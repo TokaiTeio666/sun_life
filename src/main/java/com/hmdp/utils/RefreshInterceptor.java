@@ -28,7 +28,7 @@ public class RefreshInterceptor implements HandlerInterceptor {
         //1. 获取请求头中的token
         String token = request.getHeader("authorization");
         if(StrUtil.isBlank(token)){
-            return false;
+            return true;
         }
 
         //2. 获取session中的用户
@@ -37,7 +37,7 @@ public class RefreshInterceptor implements HandlerInterceptor {
 
         //3. 判断用户是否存在
         if(userMap.isEmpty()){
-            return true;
+            return false;
         }
 
         //5. 将查询到的Hash数据转化为UserDTO对象
