@@ -1,0 +1,644 @@
+{
+  "info": {
+    "name": "黑马点评 hmdp",
+    "description": "黑马点评（hm-dianping）后端接口 Collection\n\n基础信息：\n- Base URL: http://localhost:8080/api\n- 鉴权：请求头 authorization 携带登录 token（无需 Bearer 前缀）\n- 统一返回: {success, errorMsg, data, total}\n\n使用流程：\n1. 先请求「发送验证码」（验证码在服务端控制台日志中）\n2. 再请求「登录」，测试脚本会自动把 data 中的 token 存入集合变量 {{token}}\n3. 集合级已配置 authorization 请求头，需要登录的接口直接调用即可",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection-script.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080/api",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "authorization",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "用户模块",
+      "item": [
+        {
+          "name": "1. 发送验证码",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "phone",
+                  "value": "13800138000",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user/code",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "user",
+                "code"
+              ]
+            },
+            "description": "发送短信验证码。验证码不会真发短信，打印在服务端控制台日志，或从 Redis 的 login:code:{phone} 查看（2 分钟有效）。"
+          },
+          "response": []
+        },
+        {
+          "name": "2. 登录（自动保存token）",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.success && json.data) {",
+                  "    pm.collectionVariables.set(\"token\", json.data);",
+                  "    console.log(\"登录成功，token 已保存:\", json.data);",
+                  "} else {",
+                  "    console.log(\"登录失败:\", json.errorMsg || json);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"phone\": \"13800138000\",\n  \"code\": \"123456\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "user",
+                "login"
+              ]
+            },
+            "description": "登录。响应 data 即 token，测试脚本自动保存到集合变量 {{token}}。\ncode 与 password 二选一，本 demo 用验证码登录。"
+          },
+          "response": []
+        },
+        {
+          "name": "3. 登出",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/user/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "user",
+                "logout"
+              ]
+            },
+            "description": "⚠️ 后端未实现，当前返回\"功能未完成\"。"
+          },
+          "response": []
+        },
+        {
+          "name": "4. 我的信息",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/user/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "user",
+                "me"
+              ]
+            },
+            "description": "获取当前登录用户信息（需登录）。"
+          },
+          "response": []
+        },
+        {
+          "name": "5. 用户详情",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/user/info/1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "user",
+                "info",
+                "1"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "查询用户详情，路径参数 id 为用户 id。"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "商铺模块",
+      "item": [
+        {
+          "name": "1. 查询商铺详情",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shop/1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shop",
+                "1"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "根据 id 查询商铺信息。"
+          },
+          "response": []
+        },
+        {
+          "name": "2. 新增商铺",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"测试店铺\",\n  \"typeId\": 1,\n  \"images\": \"/imgs/shop/1.png\",\n  \"area\": \"陆家嘴\",\n  \"address\": \"世纪大道100号\",\n  \"x\": 121.5,\n  \"y\": 31.23,\n  \"avgPrice\": 100,\n  \"sold\": 0,\n  \"comments\": 0,\n  \"score\": 45,\n  \"openHours\": \"10:00-22:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/shop",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shop"
+              ]
+            },
+            "description": "新增商铺，响应 data 返回商铺 id。"
+          },
+          "response": []
+        },
+        {
+          "name": "3. 更新商铺",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": 1,\n  \"name\": \"更新后的店铺名\",\n  \"typeId\": 1,\n  \"avgPrice\": 120,\n  \"openHours\": \"10:00-22:00\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/shop",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shop"
+              ]
+            },
+            "description": "更新商铺信息，Body 需包含 id。"
+          },
+          "response": []
+        },
+        {
+          "name": "4. 按类型分页查询",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shop/of/type?typeId=1&current=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shop",
+                "of",
+                "type"
+              ],
+              "query": [
+                {
+                  "key": "typeId",
+                  "value": "1"
+                },
+                {
+                  "key": "current",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "按商铺类型分页查询，每页 5 条（DEFAULT_PAGE_SIZE）。"
+          },
+          "response": []
+        },
+        {
+          "name": "5. 按名称查询",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shop/of/name?name=测试&current=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shop",
+                "of",
+                "name"
+              ],
+              "query": [
+                {
+                  "key": "name",
+                  "value": "测试"
+                },
+                {
+                  "key": "current",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "按商铺名称关键字分页查询，每页 10 条（MAX_PAGE_SIZE）。name 可空。"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "商铺类型模块",
+      "item": [
+        {
+          "name": "1. 商铺类型列表",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/shop-type/list",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "shop-type",
+                "list"
+              ]
+            },
+            "description": "查询全部商铺类型。"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "博客模块",
+      "item": [
+        {
+          "name": "1. 发布探店笔记",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shopId\": 1,\n  \"title\": \"这家店太好吃了\",\n  \"images\": \"/blogs/1/2/xxx.png\",\n  \"content\": \"探店体验分享...\",\n  \"liked\": 0\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/blog",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "blog"
+              ]
+            },
+            "description": "发布探店笔记（需登录）。userId 由后端从登录态自动填充，响应 data 返回博文 id。"
+          },
+          "response": []
+        },
+        {
+          "name": "2. 点赞博文",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/blog/like/1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "blog",
+                "like",
+                "1"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "博文点赞（需登录），路径参数 id 为博文 id。当前为简单实现：liked + 1。"
+          },
+          "response": []
+        },
+        {
+          "name": "3. 我的博客",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/blog/of/me?current=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "blog",
+                "of",
+                "me"
+              ],
+              "query": [
+                {
+                  "key": "current",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "查询我的博客列表（需登录），每页 10 条。"
+          },
+          "response": []
+        },
+        {
+          "name": "4. 热门博客",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/blog/hot?current=1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "blog",
+                "hot"
+              ],
+              "query": [
+                {
+                  "key": "current",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "热门博客，按点赞数倒序，每页 10 条。无需登录。"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "优惠券模块",
+      "item": [
+        {
+          "name": "1. 新增普通券",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shopId\": 1,\n  \"title\": \"10元代金券\",\n  \"subTitle\": \"全场通用\",\n  \"rules\": \"单次消费满100可用\",\n  \"payValue\": 8000,\n  \"actualValue\": 10000,\n  \"type\": 0,\n  \"status\": 1\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/voucher",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "voucher"
+              ]
+            },
+            "description": "新增普通代金券，响应 data 返回券 id。"
+          },
+          "response": []
+        },
+        {
+          "name": "2. 新增秒杀券",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"shopId\": 1,\n  \"title\": \"1元秒杀券\",\n  \"subTitle\": \"限量100张\",\n  \"rules\": \"每人限购1张\",\n  \"payValue\": 100,\n  \"actualValue\": 10000,\n  \"type\": 1,\n  \"status\": 1,\n  \"stock\": 100,\n  \"beginTime\": \"2026-09-01T00:00:00\",\n  \"endTime\": \"2026-09-30T23:59:59\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/voucher/seckill",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "voucher",
+                "seckill"
+              ]
+            },
+            "description": "新增秒杀券。stock / beginTime / endTime 为秒杀专属字段。"
+          },
+          "response": []
+        },
+        {
+          "name": "3. 查询店铺优惠券",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/voucher/list/1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "voucher",
+                "list",
+                "1"
+              ],
+              "variable": [
+                {
+                  "key": "shopId",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "查询指定店铺的优惠券列表，路径参数 shopId。"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "秒杀订单模块",
+      "item": [
+        {
+          "name": "1. 秒杀下单",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{baseUrl}}/voucher-order/seckill/1",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "voucher-order",
+                "seckill",
+                "1"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "1"
+                }
+              ]
+            },
+            "description": "秒杀下单（需登录），路径参数 id 为秒杀券 id。⚠️ 后端未实现，当前返回\"功能未完成\"。"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "图片上传模块",
+      "item": [
+        {
+          "name": "1. 上传博文图片",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/upload/blog",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "upload",
+                "blog"
+              ]
+            },
+            "description": "上传博文图片。Body 选择 form-data，key 为 file，类型选 File 并选择本地图片。响应 data 返回文件名。"
+          },
+          "response": []
+        },
+        {
+          "name": "2. 删除图片",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/upload/blog/delete?name=/blogs/1/2/xxx.png",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "upload",
+                "blog",
+                "delete"
+              ],
+              "query": [
+                {
+                  "key": "name",
+                  "value": "/blogs/1/2/xxx.png"
+                }
+              ]
+            },
+            "description": "删除已上传的图片，参数 name 为上传接口返回的文件名。"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
