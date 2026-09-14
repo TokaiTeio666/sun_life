@@ -1,7 +1,9 @@
 package com.hmdp.controller;
 
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.RandomUtil;
+import cn.hutool.core.util.StrUtil;
 import com.hmdp.dto.LoginFormDTO;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.UserDTO;
@@ -9,12 +11,15 @@ import com.hmdp.entity.User;
 import com.hmdp.entity.UserInfo;
 import com.hmdp.service.IUserInfoService;
 import com.hmdp.service.IUserService;
+import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RegexUtils;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
 
 import static cn.hutool.db.sql.SqlExecutor.query;
@@ -37,6 +42,9 @@ public class UserController {
 
     @Resource
     private IUserInfoService userInfoService;
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     /**
      * 发送手机验证码
@@ -61,9 +69,17 @@ public class UserController {
      * @return 无
      */
     @PostMapping("/logout")
-    public Result logout(){
-        // TODO 实现登出功能
-        return Result.fail("功能未完成");
+    public Result logout(HttpServletRequest request){
+        // 1. 获取请求头中的token
+        String token = request.getHeader("authorization");
+        if (StrUtil.isBlank(token)) {
+            return Result.fail("未登录");
+        }
+        // 2. 删除Redis中的登录信息
+        stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + token);
+        // 3. 清理ThreadLocal中的用户信息
+        UserHolder.removeUser();
+        return Result.ok();
     }
 
     @GetMapping("/me")
@@ -84,5 +100,28 @@ public class UserController {
         info.setUpdateTime(null);
         // 返回
         return Result.ok(info);
+    }
+
+    // UserController 根据id查询用户
+    @GetMapping("/{id}")
+    public Result queryUserById(@PathVariable("id") Long userId){
+        // 查询详情
+        User user = userService.getById(userId);
+        if (user == null) {
+            return Result.ok();
+        }
+        UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+        // 返回
+        return Result.ok(userDTO);
+    }
+
+    @GetMapping("/sign/count")
+    public Result signCount(){
+        return userService.signCount();
+    }
+
+    @PostMapping("/sign")
+    public Result sign(){
+        return userService.sign();
     }
 }
