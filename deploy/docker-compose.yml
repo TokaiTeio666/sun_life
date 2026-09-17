@@ -105,12 +105,29 @@ services:
       SPRING_REDIS_PORT: "6379"
       ROCKETMQ_NAME_SERVER: "rocketmq-namesrv:9876"
       TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8081"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
     depends_on:
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
       rocketmq-broker:
+        condition: service_healthy
+
+  # ---------- 前端（黑马点评静态页 + /api 反向代理） ----------
+  frontend:
+    restart: unless-stopped
+    build:
+      context: ./frontend
+    container_name: hmdp-frontend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      app:
         condition: service_healthy
 
 volumes:

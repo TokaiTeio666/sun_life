@@ -210,14 +210,19 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 | `redis` | redis:5.0 | 缓存/锁/库存 |
 | `rocketmq-namesrv` / `rocketmq-broker` | apache/rocketmq:4.9.7 | 事务消息/延迟消息/死信 |
 | `app` | 本地构建（Liberica JDK8） | Spring Boot 应用，环境变量自动指向容器服务名 |
+| `frontend` | nginx:1.18-alpine | 黑马点评前端静态页 + `/api` 反向代理到 `app:8081` |
 
+> 访问方式：
+> - **前端页面（推荐）**：浏览器打开 `http://localhost:8080`（nginx 托管，登录/秒杀均在页面操作）
+> - 后端 API（调试）：`http://localhost:8081`，根路径会被登录拦截器返回 401，属正常行为
+>
 > 端口映射默认避开本机冲突（MySQL 3307、Redis 6381、RocketMQ 9878/10912/10913），
-> 可在 `deploy/.env` 中修改；应用端口固定 8081。
+> 可在 `deploy/.env` 中修改；应用端口固定 8081、前端端口默认 8080（`WEB_PORT`）。
 > 秒杀库存由应用启动时自动预热（见 4.1 可靠性设计 / `SeckillStockInitializer`），无需手动初始化。
 >
-> **实测记录**（WSL2 + Docker Engine 29.1.3 + compose 2.40.3）：
-> 一键启动后 5 个服务全部健康；登录 → 秒杀下单 → RocketMQ 异步创建订单 → 延迟消息
-> 全链路通过；重复下单被"一人一单"拦截，库存正确扣减。所有服务配置
+> **实测记录**（Docker Desktop 4.91 + WSL2 后端）：
+> 一键启动后 6 个服务全部健康；前端 `localhost:8080` 页面可访问，经 `/api` 代理登录 → 秒杀下单 → RocketMQ
+> 异步创建订单 → 延迟消息全链路通过；重复下单被"一人一单"拦截，库存正确扣减。所有服务配置
 > `restart: unless-stopped`，daemon 异常重启后会自动恢复。
 
 ### 6.2 方式二：本地直接启动
