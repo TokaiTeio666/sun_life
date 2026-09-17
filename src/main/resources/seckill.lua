@@ -28,6 +28,10 @@ end
 redis.call('incrby',stockKey,-1)
 -- 3.5 下单（保存用户）
 redis.call('sadd',orderKey,userId)
--- 3.6 发送消息到队列中
-redis.call("xadd",'stream.orders','*','userId',userId,'voucherId',voucherId,'id',orderId)
+-- 3.6 发送消息（已移至 RocketMQ 事务消息流程）
+-- 事务消息机制下：消息先以"半消息"形式发送（消费者不可见），
+-- 本脚本由 SeckillOrderTransactionListener.executeLocalTransaction 调用；
+-- 脚本返回 0（成功）→ 半消息提交 → 消费者创建订单；返回非 0 → 半消息回滚丢弃
+-- （原 Redis Stream 的 xadd 已删除，避免与 RocketMQ 双写导致订单重复创建）
+-- redis.call("xadd",'stream.orders','*','userId',userId,'voucherId',voucherId,'id',orderId)
 return 0

@@ -25,7 +25,8 @@ public class MvcConfig implements WebMvcConfigurer {
                     "/upload/**",
                     "/blog/hot",
                     "/user/code",
-                    "/user/login"
+                    "/user/login",
+                    "/demo/**"
         ).order(1);
         //刷新拦截器
         registry.addInterceptor(new RefreshInterceptor(stringRedisTemplate)).addPathPatterns("/**").order(0);
