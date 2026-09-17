@@ -1,0 +1,107 @@
+# ========== hm-dianping 一键启动编排 ==========
+# 用法：docker compose -f deploy/docker-compose.yml up -d --build
+# 环境变量可放在 deploy/.env 中覆盖（端口映射、密码等）
+
+services:
+  # ---------- MySQL 5.7（首次启动自动导入 hmdp.sql 并建库） ----------
+  mysql:
+    image: mysql:5.7
+    container_name: hmdp-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
+      MYSQL_DATABASE: hmdp
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动自动建表导数据（幂等：表存在则跳过）
+      - ../src/main/resources/db/hmdp.sql:/docker-entrypoint-initdb.d/hmdp.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ---------- Redis 5.x ----------
+  redis:
+    image: redis:5.0
+    container_name: hmdp-redis
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # ---------- RocketMQ NameServer ----------
+  rocketmq-namesrv:
+    image: apache/rocketmq:4.9.7
+    container_name: hmdp-rmqnamesrv
+    ports:
+      - "${NAMESRV_PORT:-9877}:9876"
+    command: sh mqnamesrv
+    healthcheck:
+      test: ["CMD", "bash", "-c", "ss -lnt | grep -q 9876"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ---------- RocketMQ Broker ----------
+  rocketmq-broker:
+    image: apache/rocketmq:4.9.7
+    container_name: hmdp-rmqbroker
+    ports:
+      - "${BROKER_PORT:-10912}:10909"
+      - "${BROKER_VIP_PORT:-10913}:10911"
+    environment:
+      NAMESRV_ADDR: "rocketmq-namesrv:9876"
+      JAVA_OPT_EXT: "-server -Xms512m -Xmx512m -Xmn256m"
+    command: sh mqbroker -c /home/rocketmq/broker.conf
+    volumes:
+      - ./broker.conf:/home/rocketmq/broker.conf:ro
+      - rmq-broker-store:/home/rocketmq/store
+    depends_on:
+      rocketmq-namesrv:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "ss -lnt | grep -q 10911"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ---------- 应用（Spring Boot + RocketMQ 事务消息秒杀） ----------
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: hmdp-app
+    ports:
+      - "${APP_PORT:-8081}:8081"
+    environment:
+      # 覆盖 application.yaml 中 127.0.0.1 的配置，改为容器服务名
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/hmdp?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&characterEncoding=utf8"
+      SPRING_DATASOURCE_USERNAME: "root"
+      SPRING_DATASOURCE_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
+      SPRING_REDIS_HOST: "redis"
+      SPRING_REDIS_PORT: "6379"
+      ROCKETMQ_NAME_SERVER: "rocketmq-namesrv:9876"
+      TZ: Asia/Shanghai
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rocketmq-broker:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
+  redis-data:
+  rmq-broker-store:

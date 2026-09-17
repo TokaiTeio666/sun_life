@@ -184,7 +184,38 @@ sequenceDiagram
 
 ## 六、快速启动
 
-### 6.1 环境依赖
+### 6.1 方式一：Docker 一键启动（推荐）
+
+前置：安装 Docker Desktop（Windows / macOS）或 Docker Engine + compose 插件（Linux），Maven 3.6+。
+
+```bash
+# 一键启动（自动完成：编译 jar → 构建镜像 → 启动 MySQL/Redis/RocketMQ/应用）
+# Windows
+deploy\start.bat
+# Linux / macOS
+sh deploy/start.sh
+
+# 查看状态
+docker compose -f deploy/docker-compose.yml ps
+
+# 停止（数据卷保留，再次启动数据不丢）
+deploy\stop.bat   # 或 sh deploy/stop.sh
+```
+
+**编排内容**（`deploy/docker-compose.yml`）：
+
+| 服务 | 镜像 | 说明 |
+| --- | --- | --- |
+| `mysql` | mysql:5.7 | 首次启动自动导入 `hmdp.sql` 建库建表 |
+| `redis` | redis:5.0 | 缓存/锁/库存 |
+| `rocketmq-namesrv` / `rocketmq-broker` | apache/rocketmq:4.9.7 | 事务消息/延迟消息/死信 |
+| `app` | 本地构建 | Spring Boot 应用，环境变量自动指向容器服务名 |
+
+> 端口映射默认避开本机冲突（MySQL 3307、Redis 6380、RocketMQ 9877/10912/10913），
+> 可在 `deploy/.env` 中修改；应用端口固定 8081。
+> 秒杀库存由应用启动时自动预热（见 4.1 可靠性设计 / `SeckillStockInitializer`），无需手动初始化。
+
+### 6.2 方式二：本地直接启动
 
 | 组件 | 要求 |
 | --- | --- |
@@ -194,8 +225,6 @@ sequenceDiagram
 | Redis | 5.x，默认 `127.0.0.1:6379` |
 | RocketMQ | 4.9.x，NameServer `127.0.0.1:9876`，Broker `127.0.0.1:10911` |
 
-### 6.2 启动步骤
-
 ```bash
 # 1. 启动 MySQL / Redis（略）
 
@@ -204,20 +233,12 @@ cd %ROCKETMQ_HOME%\bin
 start mqnamesrv.cmd
 start mqbroker.cmd -n 127.0.0.1:9876
 
-# 3. 编译运行
+# 3. 编译运行（启动时自动预热秒杀库存）
 mvn clean package -DskipTests
 java -jar target/hm-dianping-0.0.1-SNAPSHOT.jar
 ```
 
-### 6.3 秒杀链路初始化（首次运行）
-
-```bash
-# 初始化秒杀券库存（以 voucherId=21 为例，库存 1000）
-# 说明：改造版中 Redis 库存需显式初始化（可在发布秒杀券的接口中补充预热逻辑）
-redis-cli SET seckill:stock:21 1000
-```
-
-### 6.4 接口冒烟
+### 6.3 接口冒烟
 
 | 接口 | 说明 |
 | --- | --- |
@@ -244,7 +265,9 @@ redis-cli SET seckill:stock:21 1000
 | `controller/DemoDlqController.java` | 死信演示触发接口 |
 | `service/impl/VoucherOrderServiceImpl.java` | 秒杀主流程改造（事务消息 + 异步下单 + 超时关单） |
 | `resources/seckill.lua` | Lua 去除 Stream xadd，改为事务消息回调执行 |
+| `config/SeckillStockInitializer.java` | 启动时自动预热秒杀库存到 Redis（幂等，Docker 一键启动后立即可秒杀） |
 | `pom.xml` / `application.yaml` | 新增 RocketMQ 依赖与配置 |
+| `deploy/` | Docker 一键启动：Dockerfile / docker-compose.yml / broker.conf / 启停脚本 |
 
 ### 7.2 目录结构
 
@@ -266,7 +289,7 @@ src/main/java/com/hmdp/
 - [ ] 未做接口限流（可加 Redis 令牌桶）；
 - [ ] 单机部署，未验证多实例消费水平扩展（RocketMQ 消费组天然支持）；
 - [ ] 延迟消息使用 RocketMQ 4.x 固定 18 级延迟等级，5.x 支持任意时间点定时消息；
-- [ ] 建议补充 docker-compose 一键启动环境。
+- [x] Docker 一键启动（`deploy/`，MySQL/Redis/RocketMQ/应用 全容器化）。
 
 ---
 
