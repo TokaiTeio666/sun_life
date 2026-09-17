@@ -184,9 +184,9 @@ sequenceDiagram
 
 ## 六、快速启动
 
-### 6.1 方式一：Docker 一键启动（推荐）
+### 6.1 方式一：Docker 一键启动（推荐，已实测通过）
 
-前置：安装 Docker Desktop（Windows / macOS）或 Docker Engine + compose 插件（Linux），Maven 3.6+。
+前置：Docker Engine 20.10+ 与 compose 插件（Linux/WSL2），或 Docker Desktop（Windows/macOS），Maven 3.6+。
 
 ```bash
 # 一键启动（自动完成：编译 jar → 构建镜像 → 启动 MySQL/Redis/RocketMQ/应用）
@@ -206,14 +206,19 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 
 | 服务 | 镜像 | 说明 |
 | --- | --- | --- |
-| `mysql` | mysql:5.7 | 首次启动自动导入 `hmdp.sql` 建库建表 |
+| `mysql` | mysql:5.7 | 首次启动自动导入 `hmdp.sql` 建库建表（关闭严格模式兼容课程 SQL） |
 | `redis` | redis:5.0 | 缓存/锁/库存 |
 | `rocketmq-namesrv` / `rocketmq-broker` | apache/rocketmq:4.9.7 | 事务消息/延迟消息/死信 |
-| `app` | 本地构建 | Spring Boot 应用，环境变量自动指向容器服务名 |
+| `app` | 本地构建（Liberica JDK8） | Spring Boot 应用，环境变量自动指向容器服务名 |
 
 > 端口映射默认避开本机冲突（MySQL 3307、Redis 6380、RocketMQ 9877/10912/10913），
 > 可在 `deploy/.env` 中修改；应用端口固定 8081。
 > 秒杀库存由应用启动时自动预热（见 4.1 可靠性设计 / `SeckillStockInitializer`），无需手动初始化。
+>
+> **实测记录**（WSL2 + Docker Engine 29.1.3 + compose 2.40.3）：
+> 一键启动后 5 个服务全部健康；登录 → 秒杀下单 → RocketMQ 异步创建订单 → 延迟消息
+> 全链路通过；重复下单被"一人一单"拦截，库存正确扣减。所有服务配置
+> `restart: unless-stopped`，daemon 异常重启后会自动恢复。
 
 ### 6.2 方式二：本地直接启动
 

@@ -1,6 +1,7 @@
 # hm-dianping 应用镜像
 # 构建上下文为项目根目录（docker-compose 中指定 context: ..）
-FROM eclipse-temurin:8-jre
+# 基础镜像：Liberica JDK8（Debian），与 eclipse-temurin 同为上游 OpenJDK 发行版
+FROM bellsoft/liberica-openjdk-debian:8
 
 LABEL maintainer="hm-dianping" \
       description="hm-dianping backend (Spring Boot 2.7.18 / RocketMQ 4.9.7)"
