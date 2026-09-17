@@ -211,7 +211,7 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 | `rocketmq-namesrv` / `rocketmq-broker` | apache/rocketmq:4.9.7 | 事务消息/延迟消息/死信 |
 | `app` | 本地构建（Liberica JDK8） | Spring Boot 应用，环境变量自动指向容器服务名 |
 
-> 端口映射默认避开本机冲突（MySQL 3307、Redis 6380、RocketMQ 9877/10912/10913），
+> 端口映射默认避开本机冲突（MySQL 3307、Redis 6381、RocketMQ 9878/10912/10913），
 > 可在 `deploy/.env` 中修改；应用端口固定 8081。
 > 秒杀库存由应用启动时自动预热（见 4.1 可靠性设计 / `SeckillStockInitializer`），无需手动初始化。
 >
