@@ -1,0 +1,34 @@
+{
+  "Total" : {
+    "transaction" : "Total",
+    "sampleCount" : 94475,
+    "errorCount" : 2271,
+    "errorPct" : 2.4038105,
+    "meanResTime" : 309.8387933315715,
+    "medianResTime" : 274.0,
+    "minResTime" : 0.0,
+    "maxResTime" : 507.0,
+    "pct1ResTime" : 335.0,
+    "pct2ResTime" : 374.9500000000007,
+    "pct3ResTime" : 403.0,
+    "throughput" : 3171.8986066812154,
+    "receivedKBytesPerSec" : 864.0547950415478,
+    "sentKBytesPerSec" : 840.4211956521739
+  },
+  "秒杀接口" : {
+    "transaction" : "秒杀接口",
+    "sampleCount" : 94475,
+    "errorCount" : 2271,
+    "errorPct" : 2.4038105,
+    "meanResTime" : 309.8387933315715,
+    "medianResTime" : 274.0,
+    "minResTime" : 0.0,
+    "maxResTime" : 507.0,
+    "pct1ResTime" : 335.0,
+    "pct2ResTime" : 374.9500000000007,
+    "pct3ResTime" : 403.0,
+    "throughput" : 3171.8986066812154,
+    "receivedKBytesPerSec" : 864.0547950415478,
+    "sentKBytesPerSec" : 840.4211956521739
+  }
+}
