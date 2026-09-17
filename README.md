@@ -178,7 +178,7 @@ sequenceDiagram
 3. 两版在高并发下均无超卖、无重复下单（库存扣减 = 订单数 = 用户数），验证了 Lua 原子扣减 + 消费端幂等的正确性；
 4. 错误率均为**本地压测 TCP 连接拒绝**（Windows accept 队列瞬时溢出，`Connection refused`），非业务错误，生产多实例 + 网关层可消除。
 
-> 完整原始数据：`perf/report-*/statistics.json`、`perf/*.jtl`。
+> 完整统计数据：`perf/stats/*.json`（已入库）；完整 HTML 报告在本地 `perf/report-*/`（含大量第三方静态资源，未入库）；压测脚本 `perf/seckill-bench.jmx`（已入库，可复现）。
 
 ---
 
