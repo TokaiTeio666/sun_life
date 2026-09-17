@@ -115,5 +115,8 @@ services:
 
 volumes:
   mysql-data:
+    name: hmdp-mysql-data
   redis-data:
+    name: hmdp-redis-data
   rmq-broker-store:
+    name: hmdp-rmq-broker-store
