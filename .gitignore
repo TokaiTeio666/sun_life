@@ -47,3 +47,6 @@ perf-logs/
 # JMeter 原始结果（体积大，报告 HTML 已入库，需要原始数据可自行生成）
 perf/*.jtl
 perf/report-*/
+
+deploy/cpolar.log
+deploy/cpolar.err.log
