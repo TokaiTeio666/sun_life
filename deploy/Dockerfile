@@ -16,4 +16,7 @@ EXPOSE 8081
 # 时区对齐 Asia/Shanghai
 ENV TZ=Asia/Shanghai
 
-ENTRYPOINT ["java", "-jar", "app.jar"]
+# 支持通过 JAVA_OPTS 注入 JVM 参数（云服务器低内存场景限制堆大小）
+# exec 让 java 成为容器主进程，保证 SIGTERM 信号正确转发
+ENV JAVA_OPTS=""
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar app.jar"]

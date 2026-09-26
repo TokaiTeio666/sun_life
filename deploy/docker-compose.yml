@@ -51,6 +51,9 @@ services:
     container_name: hmdp-rmqnamesrv
     ports:
       - "${NAMESRV_PORT:-9877}:9876"
+    environment:
+      # 官方镜像 namesrv 默认 JVM 可达 2G+，限制后云服务器 4G 内存可跑
+      JAVA_OPT_EXT: "-server -Xms256m -Xmx256m -Xmn128m"
     command: sh mqnamesrv
     healthcheck:
       # 容器内无 ss/netstat，用 bash /dev/tcp 探测端口
@@ -104,6 +107,8 @@ services:
       SPRING_REDIS_HOST: "redis"
       SPRING_REDIS_PORT: "6379"
       ROCKETMQ_NAME_SERVER: "rocketmq-namesrv:9876"
+      # 云服务器低内存场景限制堆大小（4G 内存机器推荐值）
+      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8"
       TZ: Asia/Shanghai
     healthcheck:
       test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/8081"]
