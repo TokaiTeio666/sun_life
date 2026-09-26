@@ -50,6 +50,3 @@ perf/report-*/
 
 deploy/cpolar.log
 deploy/cpolar.err.log
-
-deploy/frontend/node_modules/
-deploy/frontend/html/js-orig/

@@ -77,90 +77,88 @@
 <!-- 引入组件库 -->
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
-<script>var app = new Vue({
-  el: "#app",
-  data: {
-    util: util,
-    isReachBottom: false,
-    types: [],
-    // 类型列表
-    shops: [],
-    // 商店列表
-    typeName: "",
-    params: {
-      typeId: 0,
-      current: 1,
-      sortBy: "",
-      x: 120.149993,
-      // 经度
-      y: 30.334229 // 纬度
-    }
-  },
-  created: function created() {
-    // 获取参数
-    this.params.typeId = util.getUrlParam("type");
-    this.typeName = util.getUrlParam("name");
-    // 查询类型
-    this.queryTypes();
-    // 查询商店
-    this.queryShops();
-  },
-  methods: {
-    queryTypes: function queryTypes() {
-      var _this = this;
-      axios.get("/shop-type/list").then(function (_ref) {
-        var data = _ref.data;
-        _this.types = data;
-      }).catch(function (err) {
-        console.log(err);
-        _this.$message.error(err);
-      });
+<script>
+
+  const app = new Vue({
+    el: "#app",
+    data: {
+      util,
+      isReachBottom: false,
+      types: [], // 类型列表
+      shops: [], // 商店列表
+      typeName: "",
+      params:{
+        typeId: 0,
+        current: 1,
+        sortBy: "",
+        x: 120.149993, // 经度
+        y: 30.334229 // 纬度
+      }
     },
-    queryShops: function queryShops() {
-      var _this2 = this;
-      axios.get("/shop/of/type", {
-        params: this.params
-      }).then(function (_ref2) {
-        var data = _ref2.data;
-        if (!data) {
-          return;
-        }
-        data.forEach(function (s) {
-          return s.images = s.images.split(',')[0];
-        });
-        _this2.shops = _this2.shops.concat(data);
-      }).catch(function (err) {
-        console.log(err);
-        _this2.$message.error(err);
-      });
-    },
-    handleCommand: function handleCommand(t) {
-      location.href = "/shop-list.html?type=" + t.id + "&name=" + t.name;
-    },
-    sortAndQuery: function sortAndQuery(sortBy) {
-      this.params.sortBy = sortBy;
+    created() {
+      // 获取参数
+      this.params.typeId = util.getUrlParam("type");
+      this.typeName = util.getUrlParam("name");
+      // 查询类型
+      this.queryTypes();
+      // 查询商店
       this.queryShops();
     },
-    goBack: function goBack() {
-      history.back();
-    },
-    toDetail: function toDetail(id) {
-      location.href = "/shop-detail.html?id=" + id;
-    },
-    onScroll: function onScroll(e) {
-      var scrollTop = e.target.scrollTop;
-      var offsetHeight = e.target.offsetHeight;
-      var scrollHeight = e.target.scrollHeight;
-      if (scrollTop + offsetHeight + 1 > scrollHeight && !this.isReachBottom) {
-        this.isReachBottom = true;
-        console.log("触底");
-        this.params.current++;
-        this.queryShops(this.params.current, 5);
-      } else {
-        this.isReachBottom = false;
-      }
+    methods: {
+      queryTypes() {
+        axios.get("/shop-type/list")
+          .then(({data}) => {
+            this.types = data;
+          })
+          .catch(err => {
+            console.log(err);
+            this.$message.error(err)
+          })
+      },
+      queryShops() {
+        axios.get("/shop/of/type", {
+            params: this.params
+          })
+          .then(({data}) => {
+            if (!data) {
+              return
+            }
+            data.forEach(s => s.images = s.images.split(',')[0]);
+            this.shops = this.shops.concat(data);
+          })
+          .catch(err => {
+            console.log(err);
+            this.$message.error(err)
+          })
+      },
+      handleCommand(t) {
+        location.href = "/shop-list.html?type="+t.id+"&name="+t.name;
+      },
+      sortAndQuery(sortBy) {
+        this.params.sortBy = sortBy;
+        this.queryShops();
+      },
+      goBack() {
+        history.back();
+      },
+      toDetail(id) {
+        location.href = "/shop-detail.html?id="+id
+      },
+      onScroll(e) {
+        let scrollTop = e.target.scrollTop;
+        let offsetHeight = e.target.offsetHeight;
+        let scrollHeight = e.target.scrollHeight;
+        if(scrollTop + offsetHeight + 1 > scrollHeight && !this.isReachBottom){
+          this.isReachBottom = true
+          console.log("触底")
+          this.params.current++
+          this.queryShops(this.params.current, 5);
+        }else{
+          this.isReachBottom = false
+        }
+      },
     }
-  }
-});</script>
+  })
+</script>
 </body>
 </html>

@@ -153,239 +153,236 @@
 <!-- 引入组件库 -->
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
-<script>var each = function each(ary, callback) {
-  for (var i = 0, l = ary.length; i < l; i++) {
-    if (callback(ary[i], i) === false) break;
-  }
-};
-var app = new Vue({
-  el: "#app",
-  data: {
-    util: util,
-    blog: {},
-    shop: {},
-    likes: [],
-    user: {},
-    // 登录用户
-    followed: false,
-    // 是否关注了
-    _width: 0,
-    duration: 300,
-    container: null,
-    items: [],
-    active: 0,
-    start: {
-      x: 0,
-      y: 0
-    },
-    move: {
-      x: 0,
-      y: 0
-    },
-    sensitivity: 60,
-    resistance: 0.3
-  },
-  created: function created() {
-    var id = util.getUrlParam("id");
-    this.queryBlogById(id);
-  },
-  methods: {
-    init: function init() {
-      // 获得父容器节点
-      this.container = this.$refs.swiper;
-      // 获得所有的子节点
-      this.items = this.container.querySelectorAll('.swiper-item');
-      this.updateItemWidth();
-      this.setTransform();
-      this.setTransition('none');
-    },
-    goBack: function goBack() {
-      history.back();
-    },
-    toOtherInfo: function toOtherInfo() {
-      if (this.blog.userId === this.user.id) {
-        location.href = "/info.html";
-      } else {
-        location.href = "/other-info.html?id=" + this.blog.userId;
-      }
-    },
-    queryBlogById: function queryBlogById(id) {
-      var _this = this;
-      axios.get("/blog/" + id).then(function (_ref) {
-        var data = _ref.data;
-        data.images = data.images.split(",");
-        _this.blog = data;
-        _this.$nextTick(_this.init);
-        _this.queryShopById(data.shopId);
-        _this.queryLikeList(id);
-        _this.queryLoginUser();
-      }).catch(this.$message.error);
-    },
-    queryShopById: function queryShopById(shopId) {
-      var _this2 = this;
-      axios.get("/shop/" + shopId).then(function (_ref2) {
-        var data = _ref2.data;
-        data.image = data.images.split(",")[0];
-        _this2.shop = data;
-      }).catch(this.$message.error);
-    },
-    queryLikeList: function queryLikeList(id) {
-      var _this3 = this;
-      axios.get("/blog/likes/" + id).then(function (_ref3) {
-        var data = _ref3.data;
-        return _this3.likes = data;
-      }).catch(this.$message.error);
-    },
-    addLike: function addLike() {
-      var _this4 = this;
-      axios.put("/blog/like/" + this.blog.id).then(function (_ref4) {
-        var data = _ref4.data;
-        axios.get("/blog/" + _this4.blog.id).then(function (_ref5) {
-          var data = _ref5.data;
-          data.images = data.images.split(",");
-          _this4.blog = data;
-          _this4.queryLikeList(_this4.blog.id);
-        }).catch(_this4.$message.error);
-      }).catch(function (err) {
-        _this4.$message.error(err);
-      });
-    },
-    isFollowed: function isFollowed() {
-      var _this5 = this;
-      axios.get("/follow/or/not/" + this.blog.userId).then(function (_ref6) {
-        var data = _ref6.data;
-        return _this5.followed = data;
-      }).catch(this.$message.error);
-    },
-    follow: function follow() {
-      var _this6 = this;
-      axios.put("/follow/" + this.blog.userId + "/" + !this.followed).then(function () {
-        _this6.$message.success(_this6.followed ? "已取消关注" : "已关注");
-        _this6.followed = !_this6.followed;
-      }).catch(this.$message.error);
-    },
-    formatTime: function formatTime(b) {
-      return b.getFullYear() + "年" + (b.getMonth() + 1) + "月" + b.getDate() + "日 ";
-    },
-    formatMinutes: function formatMinutes(m) {
-      if (m < 10) m = "0" + m;
-      return m;
-    },
-    queryLoginUser: function queryLoginUser() {
-      var _this7 = this;
-      // 查询用户信息
-      axios.get("/user/me").then(function (_ref7) {
-        var data = _ref7.data;
-        // 保存用户
-        _this7.user = data;
-        if (_this7.user.id !== _this7.blog.userId) {
-          _this7.isFollowed();
-        }
-      }).catch(console.log);
-    },
-    // 获取父容器宽度，并且更新所有的子节点宽度，因为我们默认所有子节点的宽高等于父节点的宽高
-    updateItemWidth: function updateItemWidth() {
-      this._width = this.container.offsetWidth || document.documentElement.offsetWidth;
-    },
-    // 根据当前活动子项的下标计算各个子项的X轴位置
-    // 计算公式(子项的下标 - 当前活动下标) * 子项宽度 + 偏移(手指移动距离)；
-    setTransform: function setTransform(offset) {
-      var _this8 = this;
-      offset = offset || 0;
-      each(this.items, function (item, i) {
-        var distance = (i - _this8.active) * _this8._width + offset;
-        var transform = "translate3d(".concat(distance, "px, 0, 0)");
-        item.style.webkitTransform = transform;
-        item.style.transform = transform;
-      });
-    },
-    // 给每一个子项添加transition过度动画
-    setTransition: function setTransition(duration) {
-      duration = duration || this.duration;
-      duration = typeof duration === 'number' ? duration + 'ms' : duration;
-      each(this.items, function (item) {
-        item.style.webkitTransition = duration;
-        item.style.transition = duration;
-      });
-    },
-    moveStart: function moveStart(e) {
-      console.log('moveStart');
-      this.start.x = e.changedTouches[0].pageX;
-      this.start.y = e.changedTouches[0].pageY;
-      this.setTransition('none');
-    },
-    moving: function moving(e) {
-      console.log('moving');
-      e.preventDefault();
-      e.stopPropagation();
-      var distanceX = e.changedTouches[0].pageX - this.start.x;
-      var distanceY = e.changedTouches[0].pageY - this.start.y;
-      if (Math.abs(distanceX) > Math.abs(distanceY)) {
-        this.isMoving = true;
-        this.move.x = this.start.x + distanceX;
-        this.move.y = this.start.y + distanceY;
-        // 当活动子项为第一项且手指向右滑动或者活动项为最后一项切向左滑动的时候，添加阻力，形成一个拉弹簧的效果
-        if (this.active === 0 && distanceX > 0 || this.active === this.items.length - 1 && distanceX < 0) {
-          distanceX = distanceX * this.resistance;
-        }
-        this.setTransform(distanceX);
-      }
-    },
-    moveEnd: function moveEnd(e) {
-      console.log('moveEnd');
-      if (this.isMoving) {
-        e.preventDefault();
-        e.stopPropagation();
-        var distance = this.move.x - this.start.x;
-        if (Math.abs(distance) > this.sensitivity) {
-          if (distance < 0) {
-            this.next();
-          } else {
-            this.prev();
-          }
-        } else {
-          this.back();
-        }
-        this.reset();
-        this.isMoving = false;
-      }
-    },
-    next: function next() {
-      var index = this.active + 1;
-      // 运用动画切换到指定下标的子项
-      this.go(index);
-    },
-    prev: function prev() {
-      var index = this.active - 1;
-      // 运用动画切换到指定下标的子项
-      this.go(index);
-    },
-    reset: function reset() {
-      this.start.x = 0;
-      this.start.y = 0;
-      this.move.x = 0;
-      this.move.y = 0;
-    },
-    back: function back() {
-      this.setTransition();
-      this.setTransform();
-    },
-    destroy: function destroy() {
-      this.setTransition('none');
-    },
-    // 运用动画切换到指定下标的子项
-    go: function go(index) {
-      this.active = index;
-      if (this.active < 0) {
-        this.active = 0;
-      } else if (this.active > this.items.length - 1) {
-        this.active = this.items.length - 1;
-      }
-      this.$emit('change', this.active);
-      this.setTransition();
-      this.setTransform();
+<script>
+  let each = function (ary, callback) {
+    for (let i = 0, l = ary.length; i < l; i++) {
+      if (callback(ary[i], i) === false) break
     }
   }
-});</script>
+  const app = new Vue({
+    el: "#app",
+    data: {
+      util,
+      blog: {},
+      shop: {},
+      likes: [],
+      user: {}, // 登录用户
+      followed: false, // 是否关注了
+      _width: 0,
+      duration: 300,
+      container: null,
+      items: [],
+      active: 0,
+      start: {
+        x: 0,
+        y: 0
+      },
+      move: {
+        x: 0,
+        y: 0
+      },
+      sensitivity: 60,
+      resistance: 0.3
+    },
+    created() {
+      let id = util.getUrlParam("id");
+      this.queryBlogById(id);
+    },
+    methods: {
+      init() {
+        // 获得父容器节点
+        this.container = this.$refs.swiper
+        // 获得所有的子节点
+        this.items = this.container.querySelectorAll('.swiper-item')
+        this.updateItemWidth()
+        this.setTransform()
+        this.setTransition('none')
+      },
+      goBack() {
+        history.back();
+      },
+      toOtherInfo(){
+        if(this.blog.userId === this.user.id){
+          location.href = "/info.html"
+        }else{
+          location.href = "/other-info.html?id=" + this.blog.userId
+        }
+      },
+      queryBlogById(id) {
+        axios.get("/blog/" + id)
+          .then(({data}) => {
+            data.images = data.images.split(",")
+            this.blog = data;
+            this.$nextTick(this.init);
+            this.queryShopById(data.shopId)
+            this.queryLikeList(id);
+            this.queryLoginUser();
+          })
+          .catch(this.$message.error)
+      },
+      queryShopById(shopId) {
+        axios.get("/shop/" + shopId)
+          .then(({data}) => {
+            data.image = data.images.split(",")[0]
+            this.shop = data
+          })
+          .catch(this.$message.error)
+      },
+      queryLikeList(id){
+        axios.get("/blog/likes/" + id)
+          .then(({data}) => this.likes = data)
+          .catch(this.$message.error)
+      },
+      addLike(){
+        axios.put("/blog/like/" +this.blog.id)
+          .then(({data}) => {
+            axios.get("/blog/" + this.blog.id)
+              .then(({data}) => {
+                data.images = data.images.split(",")
+                this.blog = data;
+                this.queryLikeList(this.blog.id);
+              })
+              .catch(this.$message.error)
+          })
+          .catch(err => {
+            this.$message.error(err)
+          })
+      },
+      isFollowed(){
+        axios.get("/follow/or/not/" + this.blog.userId)
+          .then(({data}) => this.followed = data)
+          .catch(this.$message.error)
+      },
+      follow(){
+        axios.put("/follow/" + this.blog.userId + "/" + !this.followed)
+          .then(() => {
+            this.$message.success(this.followed ? "已取消关注" : "已关注")
+            this.followed = !this.followed
+          })
+          .catch(this.$message.error)
+      },
+      formatTime(b) {
+        return b.getFullYear() + "年" + (b.getMonth() + 1) + "月" + b.getDate() + "日 ";
+      },
+      formatMinutes(m) {
+        if (m < 10) m = "0" + m
+        return m;
+      },
+      queryLoginUser(){
+        // 查询用户信息
+        axios.get("/user/me")
+          .then(({ data }) => {
+            // 保存用户
+            this.user = data;
+            if(this.user.id !== this.blog.userId){
+              this.isFollowed();
+            }
+          })
+          .catch(console.log)
+      },
+      // 获取父容器宽度，并且更新所有的子节点宽度，因为我们默认所有子节点的宽高等于父节点的宽高
+      updateItemWidth() {
+        this._width = this.container.offsetWidth || document.documentElement.offsetWidth
+      },
+      // 根据当前活动子项的下标计算各个子项的X轴位置
+      // 计算公式(子项的下标 - 当前活动下标) * 子项宽度 + 偏移(手指移动距离)；
+      setTransform(offset) {
+        offset = offset || 0
+        each(this.items, (item, i) => {
+          let distance = (i - this.active) * this._width + offset
+          let transform = `translate3d(${distance}px, 0, 0)`
+          item.style.webkitTransform = transform
+          item.style.transform = transform
+        })
+      },
+      // 给每一个子项添加transition过度动画
+      setTransition(duration) {
+        duration = duration || this.duration
+        duration = typeof duration === 'number' ? (duration + 'ms') : duration
+        each(this.items, (item) => {
+          item.style.webkitTransition = duration
+          item.style.transition = duration
+        })
+      },
+      moveStart(e) {
+        console.log('moveStart')
+        this.start.x = e.changedTouches[0].pageX
+        this.start.y = e.changedTouches[0].pageY
+        this.setTransition('none')
+      },
+      moving(e) {
+        console.log('moving')
+        e.preventDefault()
+        e.stopPropagation()
+        let distanceX = e.changedTouches[0].pageX - this.start.x
+        let distanceY = e.changedTouches[0].pageY - this.start.y
+        if (Math.abs(distanceX) > Math.abs(distanceY)) {
+          this.isMoving = true
+          this.move.x = this.start.x + distanceX
+          this.move.y = this.start.y + distanceY
+          // 当活动子项为第一项且手指向右滑动或者活动项为最后一项切向左滑动的时候，添加阻力，形成一个拉弹簧的效果
+          if ((this.active === 0 && distanceX > 0) || (this.active === (this.items.length - 1) && distanceX < 0)) {
+            distanceX = distanceX * this.resistance
+          }
+          this.setTransform(distanceX)
+        }
+      },
+      moveEnd(e) {
+        console.log('moveEnd')
+        if (this.isMoving) {
+          e.preventDefault()
+          e.stopPropagation()
+          let distance = this.move.x - this.start.x
+          if (Math.abs(distance) > this.sensitivity) {
+            if (distance < 0) {
+              this.next()
+            } else {
+              this.prev()
+            }
+          } else {
+            this.back()
+          }
+          this.reset()
+          this.isMoving = false
+        }
+      },
+      next() {
+        let index = this.active + 1
+        // 运用动画切换到指定下标的子项
+        this.go(index)
+      },
+      prev() {
+        let index = this.active - 1
+        // 运用动画切换到指定下标的子项
+        this.go(index)
+      },
+      reset() {
+        this.start.x = 0
+        this.start.y = 0
+        this.move.x = 0
+        this.move.y = 0
+      },
+      back() {
+        this.setTransition()
+        this.setTransform()
+      },
+      destroy() {
+        this.setTransition('none')
+      },
+      // 运用动画切换到指定下标的子项
+      go(index) {
+        this.active = index
+        if (this.active < 0) {
+          this.active = 0
+        } else if (this.active > this.items.length - 1) {
+          this.active = this.items.length - 1
+        }
+        this.$emit('change', this.active)
+        this.setTransition()
+        this.setTransform()
+      }
+    }
+  })
+</script>
 </body>
 </html>

@@ -100,156 +100,144 @@
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
 <script src="./js/footer.js"></script>
-<script>var _excluded = ["list"];
-function _objectWithoutProperties(e, t) { if (null == e) return {}; var o, r, i = _objectWithoutPropertiesLoose(e, t); if (Object.getOwnPropertySymbols) { var n = Object.getOwnPropertySymbols(e); for (r = 0; r < n.length; r++) o = n[r], -1 === t.indexOf(o) && {}.propertyIsEnumerable.call(e, o) && (i[o] = e[o]); } return i; }
-function _objectWithoutPropertiesLoose(r, e) { if (null == r) return {}; var t = {}; for (var n in r) if ({}.hasOwnProperty.call(r, n)) { if (-1 !== e.indexOf(n)) continue; t[n] = r[n]; } return t; }
-var app = new Vue({
-  el: "#app",
-  data: {
-    user: "",
-    activeName: "1",
-    info: {},
-    blogs: [],
-    blogs2: [],
-    // 关注的人的播客
-    params: {
-      minTime: 0,
-      // 上一次拉取到的时间戳
-      offset: 0 // 偏移量
+<script>
+  const app = new Vue({
+    el: "#app",
+    data: {
+      user: "",
+      activeName: "1",
+      info: {},
+      blogs: [],
+      blogs2: [], // 关注的人的播客
+      params: {
+        minTime: 0, // 上一次拉取到的时间戳
+        offset: 0, // 偏移量
+      },
+      count: 5,
+      isReachBottom: false,
     },
-    count: 5,
-    isReachBottom: false
-  },
-  created: function created() {
-    this.queryUser();
-  },
-  methods: {
-    load: function load() {
-      this.count += 2;
+    created() {
+      this.queryUser();
     },
-    queryBlogs: function queryBlogs() {
-      var _this = this;
-      axios.get("/blog/of/me").then(function (_ref) {
-        var data = _ref.data;
-        return _this.blogs = data;
-      }).catch(this.$message.error);
-    },
-    queryBlogsOfFollow: function queryBlogsOfFollow(clear) {
-      var _this2 = this;
-      if (clear) {
-        this.params.offset = 0;
-        this.params.minTime = new Date().getTime() + 1;
-      }
-      var _this$params = this.params,
-        minTime = _this$params.minTime,
-        os = _this$params.offset;
-      axios.get("/blog/of/follow", {
-        params: {
-          offset: os,
-          lastId: minTime || new Date().getTime() + 1
+    methods: {
+      load() {
+        this.count += 2;
+      },
+      queryBlogs() {
+        axios.get("/blog/of/me")
+          .then(({data}) => this.blogs = data)
+          .catch(this.$message.error)
+      },
+      queryBlogsOfFollow(clear) {
+        if (clear) {
+          this.params.offset = 0;
+          this.params.minTime = new Date().getTime() + 1;
         }
-      }).then(function (_ref2) {
-        var data = _ref2.data;
-        if (!data) {
-          return;
+        let {minTime, offset: os} = this.params;
+        axios.get("/blog/of/follow", {
+            params: {offset: os, lastId: minTime || new Date().getTime() + 1}
+          })
+          .then(({data}) => {
+            if (!data) {
+              return;
+            }
+            let {list, ...params} = data;
+            list.forEach(b => b.img = b.images.split(",")[0])
+            this.blogs2 = clear ? list : this.blogs2.concat(list);
+            this.params = params;
+          })
+          .catch(e => console.log(e))
+      },
+      queryUser() {
+        // 查询用户信息
+        axios.get("/user/me")
+          .then(({data}) => {
+            // 保存用户
+            this.user = data;
+            // 查询用户详情
+            this.queryUserInfo();
+            // 查询用户笔记
+            this.queryBlogs();
+          })
+          .catch(err => {
+            location.href = "login.html"
+          })
+      },
+      goBack() {
+        history.back();
+      },
+      queryUserInfo() {
+        axios.get("/user/info/" + this.user.id)
+          .then(({data}) => {
+            if (!data) {
+              return
+            }
+            // 保存用户详情
+            this.info = data;
+            // 保存到本地
+            sessionStorage.setItem("userInfo", JSON.stringify(data))
+          })
+          .catch(err => {
+            this.$message.error(err);
+          })
+      },
+      toEdit() {
+        location.href = 'info-edit.html'
+      },
+      logout() {
+        axios.post("/user/logout")
+          .then(() => {
+            // 清理session
+            sessionStorage.removeItem("token")
+            // 跳转
+            location.href = "/"
+          })
+          .catch(this.$message.error)
+      },
+      handleClick(r) {
+        if (r.name === '4') {
+          this.queryBlogsOfFollow(true);
         }
-        var list = data.list,
-          params = _objectWithoutProperties(data, _excluded);
-        list.forEach(function (b) {
-          return b.img = b.images.split(",")[0];
-        });
-        _this2.blogs2 = clear ? list : _this2.blogs2.concat(list);
-        _this2.params = params;
-      }).catch(function (e) {
-        return console.log(e);
-      });
-    },
-    queryUser: function queryUser() {
-      var _this3 = this;
-      // 查询用户信息
-      axios.get("/user/me").then(function (_ref3) {
-        var data = _ref3.data;
-        // 保存用户
-        _this3.user = data;
-        // 查询用户详情
-        _this3.queryUserInfo();
-        // 查询用户笔记
-        _this3.queryBlogs();
-      }).catch(function (err) {
-        location.href = "login.html";
-      });
-    },
-    goBack: function goBack() {
-      history.back();
-    },
-    queryUserInfo: function queryUserInfo() {
-      var _this4 = this;
-      axios.get("/user/info/" + this.user.id).then(function (_ref4) {
-        var data = _ref4.data;
-        if (!data) {
-          return;
+      },
+      addLike(b) {
+        axios.put("/blog/like/" + b.id)
+          .then(({data}) => {
+            this.queryBlogById(b);
+          })
+          .catch(err => {
+            this.$message.error(err)
+          })
+      },
+      queryBlogById(b) {
+        axios.get("/blog/" + b.id)
+          .then(({data}) => {
+            b.liked = data.liked;
+            b.isLike = data.isLike;
+          })
+          .catch(() => {
+            this.$message.error
+            b.liked++;
+          })
+      },
+      onScroll(e) {
+        let scrollTop = e.target.scrollTop;
+        let offsetHeight = e.target.offsetHeight;
+        let scrollHeight = e.target.scrollHeight;
+        if (scrollTop === 0) {
+          // 到顶部了，查询一次
+          this.queryBlogsOfFollow(true);
+        } else if (scrollTop + offsetHeight + 1 > scrollHeight && !this.isReachBottom) {
+          this.isReachBottom = true
+          // 再次查询下一页数据
+          this.queryBlogsOfFollow();
+        } else {
+          this.isReachBottom = false
         }
-        // 保存用户详情
-        _this4.info = data;
-        // 保存到本地
-        sessionStorage.setItem("userInfo", JSON.stringify(data));
-      }).catch(function (err) {
-        _this4.$message.error(err);
-      });
-    },
-    toEdit: function toEdit() {
-      location.href = 'info-edit.html';
-    },
-    logout: function logout() {
-      axios.post("/user/logout").then(function () {
-        // 清理session
-        sessionStorage.removeItem("token");
-        // 跳转
-        location.href = "/";
-      }).catch(this.$message.error);
-    },
-    handleClick: function handleClick(r) {
-      if (r.name === '4') {
-        this.queryBlogsOfFollow(true);
       }
     },
-    addLike: function addLike(b) {
-      var _this5 = this;
-      axios.put("/blog/like/" + b.id).then(function (_ref5) {
-        var data = _ref5.data;
-        _this5.queryBlogById(b);
-      }).catch(function (err) {
-        _this5.$message.error(err);
-      });
-    },
-    queryBlogById: function queryBlogById(b) {
-      var _this6 = this;
-      axios.get("/blog/" + b.id).then(function (_ref6) {
-        var data = _ref6.data;
-        b.liked = data.liked;
-        b.isLike = data.isLike;
-      }).catch(function () {
-        _this6.$message.error;
-        b.liked++;
-      });
-    },
-    onScroll: function onScroll(e) {
-      var scrollTop = e.target.scrollTop;
-      var offsetHeight = e.target.offsetHeight;
-      var scrollHeight = e.target.scrollHeight;
-      if (scrollTop === 0) {
-        // 到顶部了，查询一次
-        this.queryBlogsOfFollow(true);
-      } else if (scrollTop + offsetHeight + 1 > scrollHeight && !this.isReachBottom) {
-        this.isReachBottom = true;
-        // 再次查询下一页数据
-        this.queryBlogsOfFollow();
-      } else {
-        this.isReachBottom = false;
-      }
-    }
-  }
-});</script>
+
+  })
+</script>
 </body>
 
 </html>
