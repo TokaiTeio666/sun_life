@@ -143,92 +143,86 @@
 <!-- 引入组件库 -->
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
-<script>
-
-  const app = new Vue({
-    el: "#app",
-    data: {
-      util,
-      shop: {},
-      vouchers: []
+<script>var app = new Vue({
+  el: "#app",
+  data: {
+    util: util,
+    shop: {},
+    vouchers: []
+  },
+  created: function created() {
+    // 获取参数
+    var shopId = util.getUrlParam("id");
+    // 查询酒店信息
+    this.queryShopById(shopId);
+    // 查询优惠券信息
+    this.queryVoucher(shopId);
+  },
+  methods: {
+    goBack: function goBack() {
+      history.back();
     },
-    created() {
-      // 获取参数
-      let shopId = util.getUrlParam("id");
-      // 查询酒店信息
-      this.queryShopById(shopId);
-      // 查询优惠券信息
-      this.queryVoucher(shopId);
+    queryShopById: function queryShopById(shopId) {
+      var _this = this;
+      axios.get("/shop/" + shopId).then(function (_ref) {
+        var data = _ref.data;
+        data.images = data.images.split(",");
+        _this.shop = data;
+      }).catch(this.$message.error);
     },
-    methods: {
-      goBack() {
-        history.back();
-      },
-      queryShopById(shopId) {
-        axios.get("/shop/" + shopId)
-        .then(({data}) => {
-          data.images = data.images.split(",")
-          this.shop = data
-        })
-        .catch(this.$message.error)
-      },
-      queryVoucher(shopId) {
-        axios.get("/voucher/list/" + shopId)
-        .then(({data}) => {
-          this.vouchers = data;
-        })
-        .catch(this.$message.error)
-      },
-      formatTime(v){
-        let b = new Date(v.beginTime);
-        let e = new Date(v.endTime);
-        return b.getMonth() + 1 + "月" + b.getDate() + "日 "
-          +  b.getHours() + ":" + this.formatMinutes(b.getMinutes())
-          + " ~ "/*  + e.getMonth() + 1 + "月" + e.getDate() + "日 " */
-          +  e.getHours() + ":" + this.formatMinutes(e.getMinutes());
-      },
-      formatMinutes(m){
-        if(m < 10) m = "0" + m
-        return m;
-      },
-      isNotBegin(v){
-        return new Date(v.beginTime).getTime() > new Date().getTime();
-      },
-      isEnd(v){
-        return new Date(v.endTime).getTime() < new Date().getTime();
-      },
-      seckill(v){
-        if(!token){
-          this.$message.error("请先登录")
-          // 未登录，跳转
-          setTimeout(() => {
-            location.href = "/login.html"
-          }, 200);
-          return;
-        }
-        if(this.isNotBegin(v)){
-          this.$message.error("优惠券抢购尚未开始！")
-          return;
-        }
-        if(this.isEnd(v)){
-          this.$message.error("优惠券抢购已经结束！")
-          return;
-        }
-        if(v.stock < 1){
-          this.$message.error("库存不足，请刷新再试试！")
-          return;
-        }
-        let id = v.id;
-        // 秒杀抢购
-        axios.post("/voucher-order/seckill/" + id)
-        .then(({data}) => {
-          // 抢购成功，这里输出订单id，支付功能TODO
-          this.$message.success("抢购成功，订单id：" + data)
-        })
-        .catch(this.$message.error)
+    queryVoucher: function queryVoucher(shopId) {
+      var _this2 = this;
+      axios.get("/voucher/list/" + shopId).then(function (_ref2) {
+        var data = _ref2.data;
+        _this2.vouchers = data;
+      }).catch(this.$message.error);
+    },
+    formatTime: function formatTime(v) {
+      var b = new Date(v.beginTime);
+      var e = new Date(v.endTime);
+      return b.getMonth() + 1 + "月" + b.getDate() + "日 " + b.getHours() + ":" + this.formatMinutes(b.getMinutes()) + " ~ " /*  + e.getMonth() + 1 + "月" + e.getDate() + "日 " */ + e.getHours() + ":" + this.formatMinutes(e.getMinutes());
+    },
+    formatMinutes: function formatMinutes(m) {
+      if (m < 10) m = "0" + m;
+      return m;
+    },
+    isNotBegin: function isNotBegin(v) {
+      return new Date(v.beginTime).getTime() > new Date().getTime();
+    },
+    isEnd: function isEnd(v) {
+      return new Date(v.endTime).getTime() < new Date().getTime();
+    },
+    seckill: function seckill(v) {
+      var _this3 = this;
+      if (!token) {
+        this.$message.error("请先登录");
+        // 未登录，跳转
+        setTimeout(function () {
+          location.href = "/login.html";
+        }, 200);
+        return;
       }
+      if (this.isNotBegin(v)) {
+        this.$message.error("优惠券抢购尚未开始！");
+        return;
+      }
+      if (this.isEnd(v)) {
+        this.$message.error("优惠券抢购已经结束！");
+        return;
+      }
+      if (v.stock < 1) {
+        this.$message.error("库存不足，请刷新再试试！");
+        return;
+      }
+      var id = v.id;
+      // 秒杀抢购
+      axios.post("/voucher-order/seckill/" + id).then(function (_ref3) {
+        var data = _ref3.data;
+        // 抢购成功，这里输出订单id，支付功能TODO
+        _this3.$message.success("抢购成功，订单id：" + data);
+      }).catch(this.$message.error);
     }
-  })
-</script>
+  }
+});</script>
 </body>
 </html>

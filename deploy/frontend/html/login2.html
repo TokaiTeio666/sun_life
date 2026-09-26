@@ -56,37 +56,35 @@
 <!-- 引入组件库 -->
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
-<script>
-
-  const app = new Vue({
-    el: "#app",
-    data: {
-      radio: "",
-      form:{
+<script>var app = new Vue({
+  el: "#app",
+  data: {
+    radio: "",
+    form: {}
+  },
+  methods: {
+    login: function login() {
+      var _this = this;
+      if (!this.radio) {
+        this.$message.error("请先确认阅读用户协议！");
+        return;
       }
-    },
-    methods: {
-      login(){
-        if(!this.radio){
-          this.$message.error("请先确认阅读用户协议！");
-          return;
+      axios.post("/user/login", this.form).then(function (_ref) {
+        var data = _ref.data;
+        if (data) {
+          // 保存用户信息到session
+          sessionStorage.setItem("token", data);
         }
-        axios.post("/user/login", this.form)
-          .then(({data}) => {
-            if(data){
-              // 保存用户信息到session
-              sessionStorage.setItem("token", data);
-            }
-            // 跳转到首页
-            location.href = "/info.html"
-          })
-          .catch(err => this.$message.error(err))
-      },
-      goBack(){
-        history.back();
-      }
+        // 跳转到首页
+        location.href = "/info.html";
+      }).catch(function (err) {
+        return _this.$message.error(err);
+      });
+    },
+    goBack: function goBack() {
+      history.back();
     }
-  })
-</script>
+  }
+});</script>
 </body>
 </html>

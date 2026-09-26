@@ -85,106 +85,112 @@
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
 <script src="./js/footer.js"></script>
-<script>
-  const app = new Vue({
-    el: "#app",
-    data: {
-      util,
-      user: "",
-      loginUser: {},
-      activeName: "1",
-      info: {},
-      blogs: [],
-      followed: false, // 是否关注了
-      commonFollows: [], // 共同关注
-    },
-    created() {
-      this.queryUser();
-      this.queryLoginUser();
-    },
-    methods: {
-      queryBlogs() {
-        axios.get("/blog/of/user", {
-            params: {id: this.user.id, current: 1}
-          })
-          .then(({data}) => this.blogs = data)
-          .catch(this.$message.error)
-      },
-      queryLoginUser() {
-        // 查询用户信息
-        axios.get("/user/me")
-          .then(({data}) => {
-            // 保存用户
-            this.loginUser = data;
-          })
-          .catch(console.log)
-      },
-      queryUser() {
-        // 查询用户信息
-        let id = util.getUrlParam("id")
-        axios.get("/user/" + id)
-          .then(({data}) => {
-            // 保存用户
-            this.user = data;
-            // 查询用户详情
-            this.queryUserInfo();
-            // 查询用户笔记
-            this.queryBlogs();
-            // 是否被关注
-            this.isFollowed();
-          })
-          .catch(console.log)
-      },
-      goBack() {
-        history.back();
-      },
-      queryUserInfo(id) {
-        axios.get("/user/info/" + this.user.id)
-          .then(({data}) => {
-            if (!data) {
-              return
-            }
-            // 保存用户详情
-            this.info = data;
-            // 保存到本地
-            sessionStorage.setItem("userInfo", JSON.stringify(data))
-          })
-          .catch(err => {
-            this.$message.error(err);
-          })
-      },
-      isFollowed(){
-        axios.get("/follow/or/not/" + this.user.id)
-          .then(({data}) => this.followed = data)
-          .catch(this.$message.error)
-      },
-      queryCommonFollow() {
-        axios.get("/follow/common/" + this.user.id)
-          .then(({data}) => this.commonFollows = data)
-          .catch(err => {
-            this.$message.error(err);
-          })
-      },
-      follow() {
-        axios.put("/follow/" + this.user.id + "/" + !this.followed)
-          .then(() => {
-            this.$message.success(this.followed ? "已取消关注" : "已关注")
-            this.followed = !this.followed
-          })
-          .catch(this.$message.error)
-      },
-      handleClick(t) {
-        if (t.name === '2') {
-          this.queryCommonFollow();
+<script>var app = new Vue({
+  el: "#app",
+  data: {
+    util: util,
+    user: "",
+    loginUser: {},
+    activeName: "1",
+    info: {},
+    blogs: [],
+    followed: false,
+    // 是否关注了
+    commonFollows: [] // 共同关注
+  },
+  created: function created() {
+    this.queryUser();
+    this.queryLoginUser();
+  },
+  methods: {
+    queryBlogs: function queryBlogs() {
+      var _this = this;
+      axios.get("/blog/of/user", {
+        params: {
+          id: this.user.id,
+          current: 1
         }
-      },
-      toOtherInfo(id){
-        location.href = "/other-info.html?id=" + id
+      }).then(function (_ref) {
+        var data = _ref.data;
+        return _this.blogs = data;
+      }).catch(this.$message.error);
+    },
+    queryLoginUser: function queryLoginUser() {
+      var _this2 = this;
+      // 查询用户信息
+      axios.get("/user/me").then(function (_ref2) {
+        var data = _ref2.data;
+        // 保存用户
+        _this2.loginUser = data;
+      }).catch(console.log);
+    },
+    queryUser: function queryUser() {
+      var _this3 = this;
+      // 查询用户信息
+      var id = util.getUrlParam("id");
+      axios.get("/user/" + id).then(function (_ref3) {
+        var data = _ref3.data;
+        // 保存用户
+        _this3.user = data;
+        // 查询用户详情
+        _this3.queryUserInfo();
+        // 查询用户笔记
+        _this3.queryBlogs();
+        // 是否被关注
+        _this3.isFollowed();
+      }).catch(console.log);
+    },
+    goBack: function goBack() {
+      history.back();
+    },
+    queryUserInfo: function queryUserInfo(id) {
+      var _this4 = this;
+      axios.get("/user/info/" + this.user.id).then(function (_ref4) {
+        var data = _ref4.data;
+        if (!data) {
+          return;
+        }
+        // 保存用户详情
+        _this4.info = data;
+        // 保存到本地
+        sessionStorage.setItem("userInfo", JSON.stringify(data));
+      }).catch(function (err) {
+        _this4.$message.error(err);
+      });
+    },
+    isFollowed: function isFollowed() {
+      var _this5 = this;
+      axios.get("/follow/or/not/" + this.user.id).then(function (_ref5) {
+        var data = _ref5.data;
+        return _this5.followed = data;
+      }).catch(this.$message.error);
+    },
+    queryCommonFollow: function queryCommonFollow() {
+      var _this6 = this;
+      axios.get("/follow/common/" + this.user.id).then(function (_ref6) {
+        var data = _ref6.data;
+        return _this6.commonFollows = data;
+      }).catch(function (err) {
+        _this6.$message.error(err);
+      });
+    },
+    follow: function follow() {
+      var _this7 = this;
+      axios.put("/follow/" + this.user.id + "/" + !this.followed).then(function () {
+        _this7.$message.success(_this7.followed ? "已取消关注" : "已关注");
+        _this7.followed = !_this7.followed;
+      }).catch(this.$message.error);
+    },
+    handleClick: function handleClick(t) {
+      if (t.name === '2') {
+        this.queryCommonFollow();
       }
     },
-
-  })
-</script>
+    toOtherInfo: function toOtherInfo(id) {
+      location.href = "/other-info.html?id=" + id;
+    }
+  }
+});</script>
 </body>
 
 </html>

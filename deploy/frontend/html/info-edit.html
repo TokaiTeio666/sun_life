@@ -101,36 +101,34 @@
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
 <script src="./js/footer.js"></script>
-<script>
-
-  const app = new Vue({
-    el: "#app",
-    data: {
-      user: "",
-      info: {},
+<script>var app = new Vue({
+  el: "#app",
+  data: {
+    user: "",
+    info: {}
+  },
+  created: function created() {
+    this.checkLogin();
+  },
+  methods: {
+    checkLogin: function checkLogin() {
+      var _this = this;
+      // 查询用户信息
+      axios.get("/user/me").then(function (_ref) {
+        var data = _ref.data;
+        _this.user = data;
+        _this.info = JSON.parse(sessionStorage.getItem("userInfo")) || {};
+      }).catch(function (err) {
+        _this.$message.error(err);
+        setTimeout(function () {
+          return location.href = "login.html";
+        }, 1000);
+      });
     },
-    created() {
-      this.checkLogin();
-    },
-    methods: {
-      checkLogin() {
-        // 查询用户信息
-        axios.get("/user/me")
-        .then(({data}) => {
-          this.user = data;
-          this.info = JSON.parse(sessionStorage.getItem("userInfo")) || {}
-        })
-        .catch(err => {
-          this.$message.error(err);
-          setTimeout(() => location.href = "login.html", 1000)
-        })
-      },
-      goBack(){
-        history.back();
-      }
-    },
-
-  })
-</script>
+    goBack: function goBack() {
+      history.back();
+    }
+  }
+});</script>
 </body>
 </html>

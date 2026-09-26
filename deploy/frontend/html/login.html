@@ -56,67 +56,68 @@
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
 <script src="./js/footer.js"></script>
-<script>
-
-  const app = new Vue({
-    el: "#app",
-    data: {
-      radio: "",
-      disabled: false, // 发送短信按钮
-      codeBtnMsg: "发送验证码", // 发送短信按钮提示
-      form:{
+<script>var app = new Vue({
+  el: "#app",
+  data: {
+    radio: "",
+    disabled: false,
+    // 发送短信按钮
+    codeBtnMsg: "发送验证码",
+    // 发送短信按钮提示
+    form: {}
+  },
+  methods: {
+    login: function login() {
+      var _this = this;
+      if (!this.radio) {
+        this.$message.error("请先确认阅读用户协议！");
+        return;
       }
+      if (!this.form.phone || !this.form.code) {
+        this.$message.error("手机号和验证码不能为空！");
+        return;
+      }
+      axios.post("/user/login", this.form).then(function (_ref) {
+        var data = _ref.data;
+        if (data) {
+          // 保存用户信息到session
+          sessionStorage.setItem("token", data);
+        }
+        // 跳转到首页
+        location.href = "/index.html";
+      }).catch(function (err) {
+        return _this.$message.error(err);
+      });
     },
-    methods: {
-      login(){
-        if(!this.radio){
-          this.$message.error("请先确认阅读用户协议！");
-          return
-        }
-        if(!this.form.phone || !this.form.code){
-          this.$message.error("手机号和验证码不能为空！");
-          return
-        }
-        axios.post("/user/login", this.form)
-        .then(({data}) => {
-            if(data){
-              // 保存用户信息到session
-              sessionStorage.setItem("token", data);
-            }
-            // 跳转到首页
-            location.href = "/index.html"
-        })
-        .catch(err => this.$message.error(err))
-      },
-      goBack(){
-        history.back();
-      },
-      sendCode(){
-        if (!this.form.phone) {
-          this.$message.error("手机号不能为空");
-          return;
-        }
-        // 发送验证码
-        axios.post("/user/code?phone="+this.form.phone)
-          .then(() => {})
-          .catch(err => {
-            console.log(err);
-            this.$message.error(err)
-          });
-        // 禁用按钮
-        this.disabled = true;
-        // 按钮倒计时
-        let i = 60;
-        this.codeBtnMsg = (i--) + '秒后可重发'
-        let taskId = setInterval(() => this.codeBtnMsg = (i--) + '秒后可重发', 1000);
-        setTimeout(() => {
-          this.disabled = false;
-          clearInterval(taskId);
-          this.codeBtnMsg = "发送验证码";
-        }, 59000)
+    goBack: function goBack() {
+      history.back();
+    },
+    sendCode: function sendCode() {
+      var _this2 = this;
+      if (!this.form.phone) {
+        this.$message.error("手机号不能为空");
+        return;
       }
+      // 发送验证码
+      axios.post("/user/code?phone=" + this.form.phone).then(function () {}).catch(function (err) {
+        console.log(err);
+        _this2.$message.error(err);
+      });
+      // 禁用按钮
+      this.disabled = true;
+      // 按钮倒计时
+      var i = 60;
+      this.codeBtnMsg = i-- + '秒后可重发';
+      var taskId = setInterval(function () {
+        return _this2.codeBtnMsg = i-- + '秒后可重发';
+      }, 1000);
+      setTimeout(function () {
+        _this2.disabled = false;
+        clearInterval(taskId);
+        _this2.codeBtnMsg = "发送验证码";
+      }, 59000);
     }
-  })
-</script>
+  }
+});</script>
 </body>
 </html>

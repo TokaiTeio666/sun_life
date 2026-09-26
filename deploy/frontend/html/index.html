@@ -57,83 +57,80 @@
 <script src="./js/element.js"></script>
 <script src="./js/common.js"></script>
 <script src="./js/footer.js"></script>
-<script>
-
-  const app = new Vue({
-    el: "#app",
-    data: {
-      isReachBottom: false,
-      types: [], // 类型列表
-      blogs: [], // 播客列表
-      current: 1,// blog的页码
+<script>var app = new Vue({
+  el: "#app",
+  data: {
+    isReachBottom: false,
+    types: [],
+    // 类型列表
+    blogs: [],
+    // 播客列表
+    current: 1 // blog的页码
+  },
+  created: function created() {
+    // 查询类型
+    this.queryTypes();
+    this.queryHotBlogsScroll();
+  },
+  methods: {
+    queryTypes: function queryTypes() {
+      axios.get("/shop-type/list").then(function (res) {
+        var data = res.data;
+        this.types = data;
+      }).catch(function (err) {
+        this.$message.error(err);
+      });
     },
-    created() {
-      // 查询类型
-      this.queryTypes();
-      this.queryHotBlogsScroll();
+    queryHotBlogsScroll: function queryHotBlogsScroll() {
+      axios.get("/blog/hot?current=" + this.current).then(function (res) {
+        var data = res.data;
+        data.forEach(function (b) {
+          b.img = b.images.split(",")[0];
+        });
+        this.blogs = this.blogs.concat(data);
+      }).catch(function (err) {
+        this.$message.error(err);
+      });
     },
-    methods: {
-      queryTypes() {
-        axios.get("/shop-type/list")
-          .then(({data}) => {
-            this.types = data;
-          })
-          .catch(err => {
-            this.$message.error(err)
-          })
-      },
-      queryHotBlogsScroll() {
-        axios.get("/blog/hot?current=" + this.current)
-          .then(({data}) => {
-            data.forEach(b => b.img = b.images.split(",")[0]);
-            this.blogs = this.blogs.concat(data);
-          })
-          .catch(err => {
-            this.$message.error(err)
-          })
-      },
-      addLike(b) {
-        axios.put("/blog/like/" +b.id)
-          .then(({data}) => {
-            this.queryBlogById(b)
-          })
-          .catch(err => {
-            this.$message.error(err)
-          })
-      },
-      queryBlogById(b) {
-        axios.get("/blog/" + b.id)
-          .then(({data}) => {
-            b.liked = data.liked;
-            b.isLike = data.isLike;
-          })
-          .catch(() => {
-            this.$message.error
-            b.liked ++;
-          })
-      },
-      onScroll(e) {
-        let scrollTop = e.target.scrollTop;
-        let offsetHeight = e.target.offsetHeight;
-        let scrollHeight = e.target.scrollHeight;
-        if (scrollTop + offsetHeight > scrollHeight && !this.isReachBottom) {
-          this.isReachBottom = true
+    addLike: function addLike(b) {
+      axios.put("/blog/like/" + b.id).then(function (res) {
+        var data = res.data;
+        this.queryBlogById(b);
+      }).catch(function (err) {
+        this.$message.error(err);
+      });
+    },
+    queryBlogById: function queryBlogById(b) {
+      axios.get("/blog/" + b.id).then(function (res) {
+        var data = res.data;
+        b.liked = data.liked;
+        b.isLike = data.isLike;
+      }).catch(function () {
+        this.$message.error;
+        b.liked++;
+      });
+    },
+    onScroll: function onScroll(e) {
+      var scrollTop = e.target.scrollTop;
+      var offsetHeight = e.target.offsetHeight;
+      var scrollHeight = e.target.scrollHeight;
+      if (scrollTop + offsetHeight > scrollHeight && !this.isReachBottom) {
+        this.isReachBottom = true;
 
-          // 再次查询下一页数据
-          this.current++;
-          this.queryHotBlogsScroll();
-        } else {
-          this.isReachBottom = false
-        }
-      },
-      toShopList(id, name) {
-        location.href = "/shop-list.html?type=" + id + "&name=" + name
-      },
-      toBlogDetail(b) {
-        location.href = "/blog-detail.html?id=" + b.id
+        // 再次查询下一页数据
+        this.current++;
+        this.queryHotBlogsScroll();
+      } else {
+        this.isReachBottom = false;
       }
+    },
+    toShopList: function toShopList(id, name) {
+      location.href = "/shop-list.html?type=" + id + "&name=" + name;
+    },
+    toBlogDetail: function toBlogDetail(b) {
+      location.href = "/blog-detail.html?id=" + b.id;
     }
-  })
-</script>
+  }
+});</script>
 </body>
 </html>
