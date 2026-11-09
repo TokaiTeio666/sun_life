@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "黑马点评 hmdp",
-    "description": "黑马点评（hm-dianping）后端接口 Collection\n\n基础信息：\n- Base URL: http://localhost:8080/api\n- 鉴权：请求头 authorization 携带登录 token（无需 Bearer 前缀）\n- 统一返回: {success, errorMsg, data, total}\n\n使用流程：\n1. 先请求「发送验证码」（验证码在服务端控制台日志中）\n2. 再请求「登录」，测试脚本会自动把 data 中的 token 存入集合变量 {{token}}\n3. 集合级已配置 authorization 请求头，需要登录的接口直接调用即可",
+    "name": "sun_life（黑马点评）",
+    "description": "sun_life（黑马点评）后端接口 Collection\n\n基础信息：\n- Base URL: http://localhost:8080/api\n- 鉴权：请求头 authorization 携带登录 token（无需 Bearer 前缀）\n- 统一返回: {success, errorMsg, data, total}\n\n使用流程：\n1. 先请求「发送验证码」（验证码在服务端控制台日志中）\n2. 再请求「登录」，测试脚本会自动把 data 中的 token 存入集合变量 {{token}}\n3. 集合级已配置 authorization 请求头，需要登录的接口直接调用即可",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection-script.json"
   },
   "variable": [

@@ -37,7 +37,7 @@
         <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet" testname="读取token" enabled="true">
           <stringProp name="delimiter">,</stringProp>
           <stringProp name="fileEncoding">UTF-8</stringProp>
-          <stringProp name="filename">${__P(TOKEN_FILE,D:/javaproj/hm-dianping/token.txt)}</stringProp>
+          <stringProp name="filename">${__P(TOKEN_FILE,D:/javaproj/sun_life/token.txt)}</stringProp>
           <boolProp name="ignoreFirstLine">false</boolProp>
           <boolProp name="quotedData">false</boolProp>
           <boolProp name="recycle">true</boolProp>

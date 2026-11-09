@@ -1,4 +1,4 @@
-# hm-dianping 前端（黑马点评静态页 + nginx 反向代理）
+# sun_life 前端（黑马点评静态页 + nginx 反向代理）
 FROM nginx:1.18-alpine
 
 # 前端静态资源（含 index.html / login.html 等）

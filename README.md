@@ -1,4 +1,4 @@
-# hm-dianping（黑马点评 · 秒杀模块 RocketMQ 改造版）
+# sun_life（黑马点评 · 秒杀模块 RocketMQ 改造版）
 
 > 基于黑马程序员《Spring Boot 实战》课程项目 **hm-dianping** 二次开发，核心改造点：将秒杀模块的 **Redis Stream 异步下单**升级为 **RocketMQ 事务消息 + 异步下单**，补齐消息可靠性与订单超时闭环。本项目用于学习与简历展示，**非独立自研项目**，改造与新增部分为本人独立完成。
 
@@ -245,7 +245,7 @@ start mqbroker.cmd -n 127.0.0.1:9876
 
 # 3. 编译运行（启动时自动预热秒杀库存）
 mvn clean package -DskipTests
-java -jar target/hm-dianping-0.0.1-SNAPSHOT.jar
+java -jar target/sun_life-0.0.1-SNAPSHOT.jar
 ```
 
 ### 6.3 接口冒烟

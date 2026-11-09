@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ===== hm-dianping 一键启动（Linux / macOS） =====
+# ===== sun_life 一键启动（Linux / macOS） =====
 # 前置：已安装 Docker 与 docker compose 插件、Maven（mvn 在 PATH）
 set -e
 cd "$(dirname "$0")/.."

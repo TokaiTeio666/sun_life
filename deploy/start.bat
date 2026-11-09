@@ -1,5 +1,5 @@
 @echo off
-REM ===== hm-dianping 一键启动（Windows） =====
+REM ===== sun_life 一键启动（Windows） =====
 REM 前置：已安装 Docker Desktop 并启动、已安装 Maven（mvn 在 PATH）
 setlocal
 cd /d %~dp0\..
