@@ -44,53 +44,35 @@ services:
       timeout: 3s
       retries: 12
 
-  # ---------- RocketMQ NameServer ----------
-  rocketmq-namesrv:
+  # ---------- Kafka（KRaft 单节点，无需额外协调组件） ----------
+  kafka:
     restart: unless-stopped
-    image: apache/rocketmq:4.9.7
-    container_name: hmdp-rmqnamesrv
+    image: apache/kafka:3.7.0
+    container_name: hmdp-kafka
     ports:
-      - "${NAMESRV_PORT:-9877}:9876"
+      - "${KAFKA_PORT:-9092}:9092"
     environment:
-      # 官方镜像 namesrv 默认 JVM 可达 2G+，限制后云服务器 4G 内存可跑
-      JAVA_OPT_EXT: "-server -Xms256m -Xmx256m -Xmn128m"
-    command: sh mqnamesrv
-    healthcheck:
-      # 容器内无 ss/netstat，用 bash /dev/tcp 探测端口
-      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/9876"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-
-  # ---------- RocketMQ Broker ----------
-  rocketmq-broker:
-    restart: unless-stopped
-    image: apache/rocketmq:4.9.7
-    container_name: hmdp-rmqbroker
-    # 官方镜像默认以 rocketmq 用户运行，挂载的 store 命名卷归 root，
-    # 需以 root 运行才能写 store（官方 docker 示例同款做法）
-    user: root
-    ports:
-      - "${BROKER_PORT:-10912}:10909"
-      - "${BROKER_VIP_PORT:-10913}:10911"
-    environment:
-      NAMESRV_ADDR: "rocketmq-namesrv:9876"
-      JAVA_OPT_EXT: "-server -Xms512m -Xmx512m -Xmn256m"
-    command: sh mqbroker -c /home/rocketmq/broker.conf
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
-      - ./broker.conf:/home/rocketmq/broker.conf:ro
-      - rmq-broker-store:/home/rocketmq/store
-    depends_on:
-      rocketmq-namesrv:
-        condition: service_healthy
+      - kafka-data:/var/lib/kafka/data
     healthcheck:
-      # 容器内无 ss/netstat，用 bash /dev/tcp 探测端口
-      test: ["CMD", "bash", "-c", "echo > /dev/tcp/localhost/10911"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12
 
-  # ---------- 应用（Spring Boot + RocketMQ 事务消息秒杀） ----------
+  # ---------- 应用（Spring Boot + Kafka 异步秒杀） ----------
   app:
     restart: unless-stopped
     build:
@@ -106,7 +88,7 @@ services:
       SPRING_DATASOURCE_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
       SPRING_DATA_REDIS_HOST: "redis"
       SPRING_DATA_REDIS_PORT: "6379"
-      ROCKETMQ_NAME_SERVER: "rocketmq-namesrv:9876"
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       # 压测开关：false 时商铺详情直查 MySQL（用于缓存 A/B 对比）
       HMDP_CACHE_ENABLED: "${HMDP_CACHE_ENABLED:-true}"
       # 云服务器低内存场景限制堆大小（4G 内存机器推荐值）
@@ -122,7 +104,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      rocketmq-broker:
+      kafka:
         condition: service_healthy
 
   # ---------- 前端（黑马点评静态页 + /api 反向代理） ----------
@@ -142,5 +124,5 @@ volumes:
     name: hmdp-mysql8-data
   redis-data:
     name: hmdp-redis-data
-  rmq-broker-store:
-    name: hmdp-rmq-broker-store
+  kafka-data:
+    name: hmdp-kafka-data

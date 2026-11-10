@@ -34,7 +34,7 @@ public class VoucherOrderController {
 
     /**
      * 查询订单状态（异步下单后，前端轮询此接口确认结果）
-     * 返回：0=订单尚未创建（消息还在 RocketMQ 中排队/处理）；1=未支付；2=已支付；3=已核销；4=已取消；5=退款中；6=已退款
+     * 返回：0=订单尚未创建（消息还在 Kafka 中排队/处理）；1=未支付；2=已支付；3=已核销；4=已取消；5=退款中；6=已退款
      */
     @GetMapping("status/{orderId}")
     public Result queryOrderStatus(@PathVariable("orderId") Long orderId) {

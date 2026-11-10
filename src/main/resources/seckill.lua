@@ -28,10 +28,8 @@ end
 redis.call('incrby',stockKey,-1)
 -- 3.5 下单（保存用户）
 redis.call('sadd',orderKey,userId)
--- 3.6 发送消息（已移至 RocketMQ 事务消息流程）
--- 事务消息机制下：消息先以"半消息"形式发送（消费者不可见），
--- 本脚本由 SeckillOrderTransactionListener.executeLocalTransaction 调用；
--- 脚本返回 0（成功）→ 半消息提交 → 消费者创建订单；返回非 0 → 半消息回滚丢弃
--- （原 Redis Stream 的 xadd 已删除，避免与 RocketMQ 双写导致订单重复创建）
--- redis.call("xadd",'stream.orders','*','userId',userId,'voucherId',voucherId,'id',orderId)
+-- 3.6 消息投递由 Java 侧完成：
+-- Lua 返回 0 后，VoucherOrderServiceImpl 通过 KafkaTemplate 异步发送订单消息；
+-- 发送失败时执行 seckill_rollback.lua 回滚库存与去重标记。
+-- （原 Redis Stream 的 xadd 已删除，避免与 Kafka 双写导致订单重复创建）
 return 0

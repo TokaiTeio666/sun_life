@@ -12,7 +12,7 @@
     <artifactId>sun_life</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>sun_life</name>
-    <description>sun_life backend — Spring Boot local-life service (Redis + RocketMQ)</description>
+    <description>sun_life backend — Spring Boot local-life service (Redis + Kafka)</description>
     <properties>
         <java.version>17</java.version>
     </properties>
@@ -66,11 +66,10 @@
             <artifactId>redisson</artifactId>
             <version>3.32.0</version>
         </dependency>
-        <!--RocketMQ（消息队列，秒杀异步下单）-->
+        <!--Kafka（消息队列，秒杀异步下单）-->
         <dependency>
-            <groupId>org.apache.rocketmq</groupId>
-            <artifactId>rocketmq-spring-boot-starter</artifactId>
-            <version>2.3.1</version>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
         </dependency>
     </dependencies>
 

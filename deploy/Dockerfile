@@ -4,7 +4,7 @@
 FROM eclipse-temurin:17-jre
 
 LABEL maintainer="sun_life" \
-      description="sun_life backend (Spring Boot 3.3.5 / Java 17 / RocketMQ 4.9.7)"
+      description="sun_life backend (Spring Boot 3.3.5 / Java 17 / Kafka 3.7)"
 
 WORKDIR /app
 

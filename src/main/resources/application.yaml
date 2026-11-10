@@ -20,20 +20,40 @@ spring:
           time-between-eviction-runs: 10s
   jackson:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
-rocketmq:
-  name-server: 127.0.0.1:9876 # RocketMQ NameServer 地址
-  producer:
-    group: seckill-order-producer # 生产者组
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+      batch-size: 16384
+      properties:
+        enable.idempotence: true
+        linger.ms: 5
+        buffer.memory: 33554432
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      group-id: seckill-order-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 200
+    listener:
+      ack-mode: manual_immediate
+      concurrency: 3
 # 业务自定义配置
 hmdp:
   # 压测开关：false 时商铺详情跳过布隆过滤器与缓存，直接查库（用于 A/B 对比）
   cache:
     enabled: true
+  kafka:
+    consumer:
+      concurrency: 3
   order:
-    # 订单超时未支付自动关单的延迟等级（RocketMQ 延迟消息，1~18 级）
-    # 1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h
-    # 16 = 30 分钟（生产默认）；学习测试时可改小：4 = 30 秒，5 = 1 分钟
-    timeout-delay-level: 16
+    # 未支付订单超时时长与扫描间隔（Kafka 无延迟消息，改用本地定时任务）
+    timeout-minutes: 30
+    timeout-scan-ms: 60000
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:

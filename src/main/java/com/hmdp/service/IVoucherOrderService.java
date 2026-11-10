@@ -19,9 +19,11 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
     void createVoucherOrder(VoucherOrder voucherOrder);
 
     /**
-     * 超时关单（延迟消息消费者调用）：订单 30 分钟未支付则自动取消并回补库存
+     * 扫描并关闭超时未支付订单（默认 30 分钟），回补 DB 与 Redis 库存
+     *
+     * @return 本次关闭的订单数
      */
-    void closeTimeoutOrder(VoucherOrder order);
+    int closeTimeoutOrders();
 
     /**
      * 支付订单（测试/学习用：把未支付订单置为已支付）

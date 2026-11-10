@@ -40,7 +40,7 @@ docker exec hmdp-redis redis-cli SET seckill:stock:21 100000
 docker exec hmdp-redis redis-cli DEL seckill:order:21
 ```
 
-## 2. 秒杀接口
+## 2. 秒杀接口（Kafka 异步下单）
 
 ```powershell
 jmeter -n -t perf/seckill-bench.jmx `
@@ -58,15 +58,24 @@ jmeter -n -t perf/seckill-bench.jmx `
 
 | 并发 | 请求数 | QPS | 平均 RT | P95 | P99 | 错误率 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 200 | 185,515 | 6,247 | 31.5 ms | 39 ms | 42 ms | 0% |
-| 500 | 176,534 | 5,983 | 82.8 ms | 92 ms | 98 ms | 0.04% |
-| 1000 | 180,192 | 6,060 | 162.1 ms | 175 ms | 181 ms | 1.06%（TCP 拒绝） |
+| 200 | 285,334 | 9,580 | 20.4 ms | 27 ms | 31 ms | 0% |
+| 500 | 299,624 | 10,077 | 49.1 ms | 60 ms | 73 ms | 0.01% |
+| 1000 | 292,060 | 9,791 | 100.7 ms | 113 ms | 117 ms | 0.31%（TCP 拒绝） |
 
 每轮结束校验：
 
 ```powershell
 docker exec hmdp-mysql mysql -uroot -p123456 hmdp -e "SELECT COUNT(*) orders, COUNT(DISTINCT user_id) users FROM tb_voucher_order WHERE voucher_id=21; SELECT stock FROM tb_seckill_voucher WHERE voucher_id=21;"
 docker exec hmdp-redis redis-cli GET seckill:stock:21
+```
+
+### 2.1 死信链路验证
+
+发送一条非法 JSON，消费者解析失败 → 重试 3 次 → 进入 `seckill.orders.DLT`：
+
+```powershell
+'not-json' | docker exec -i hmdp-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic seckill.orders
+docker logs hmdp-app --since 20s 2>&1 | Select-String '死信'
 ```
 
 ## 3. 商铺详情缓存 A/B
