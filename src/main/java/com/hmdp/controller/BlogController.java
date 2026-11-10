@@ -13,7 +13,7 @@ import com.hmdp.utils.UserHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.bind.annotation.*;
 
-import javax.annotation.Resource;
+import jakarta.annotation.Resource;
 import java.util.List;
 
 /**
@@ -66,6 +66,15 @@ public class BlogController {
     @GetMapping("/likes/{id}")
     public Result queryBlogLikes(@PathVariable("id") Long id) {
         return blogService.queryBlogByLikes(id);
+    }
+
+    /**
+     * 笔记日 UV（HyperLogLog），date 为空时取当天，格式 yyyyMMdd
+     */
+    @GetMapping("/uv/{id}")
+    public Result queryBlogUv(@PathVariable("id") Long id,
+                              @RequestParam(value = "date", required = false) String date) {
+        return blogService.queryBlogUv(id, date);
     }
 
     @GetMapping("/of/user")

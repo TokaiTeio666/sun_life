@@ -3,10 +3,10 @@
 # 环境变量可放在 deploy/.env 中覆盖（端口映射、密码等）
 
 services:
-  # ---------- MySQL 5.7（首次启动自动导入 hmdp.sql 并建库） ----------
+  # ---------- MySQL 8（首次启动自动导入 hmdp.sql 并建库） ----------
   mysql:
     restart: unless-stopped
-    image: mysql:5.7
+    image: mysql:8.0
     container_name: hmdp-mysql
     environment:
       MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
@@ -29,10 +29,10 @@ services:
       timeout: 5s
       retries: 12
 
-  # ---------- Redis 5.x ----------
+  # ---------- Redis 7 ----------
   redis:
     restart: unless-stopped
-    image: redis:5.0
+    image: redis:7.2
     container_name: hmdp-redis
     ports:
       - "${REDIS_PORT:-6380}:6379"
@@ -104,9 +104,11 @@ services:
       SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/hmdp?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&characterEncoding=utf8"
       SPRING_DATASOURCE_USERNAME: "root"
       SPRING_DATASOURCE_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
-      SPRING_REDIS_HOST: "redis"
-      SPRING_REDIS_PORT: "6379"
+      SPRING_DATA_REDIS_HOST: "redis"
+      SPRING_DATA_REDIS_PORT: "6379"
       ROCKETMQ_NAME_SERVER: "rocketmq-namesrv:9876"
+      # 压测开关：false 时商铺详情直查 MySQL（用于缓存 A/B 对比）
+      HMDP_CACHE_ENABLED: "${HMDP_CACHE_ENABLED:-true}"
       # 云服务器低内存场景限制堆大小（4G 内存机器推荐值）
       JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8"
       TZ: Asia/Shanghai
@@ -137,7 +139,7 @@ services:
 
 volumes:
   mysql-data:
-    name: hmdp-mysql-data
+    name: hmdp-mysql8-data
   redis-data:
     name: hmdp-redis-data
   rmq-broker-store:

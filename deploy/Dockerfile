@@ -1,10 +1,10 @@
 # sun_life 应用镜像
 # 构建上下文为项目根目录（docker-compose 中指定 context: ..）
-# 基础镜像：Liberica JDK8（Debian），与 eclipse-temurin 同为上游 OpenJDK 发行版
-FROM bellsoft/liberica-openjdk-debian:8
+# 基础镜像：Eclipse Temurin JDK17（Debian）
+FROM eclipse-temurin:17-jre
 
 LABEL maintainer="sun_life" \
-      description="sun_life backend (Spring Boot 2.7.18 / RocketMQ 4.9.7)"
+      description="sun_life backend (Spring Boot 3.3.5 / Java 17 / RocketMQ 4.9.7)"
 
 WORKDIR /app
 

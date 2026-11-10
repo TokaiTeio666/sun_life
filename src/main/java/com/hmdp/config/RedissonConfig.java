@@ -11,10 +11,10 @@ import org.springframework.context.annotation.Lazy;
 @Configuration
 public class RedissonConfig {
 
-    @Value("${spring.redis.host:127.0.0.1}")
+    @Value("${spring.data.redis.host:127.0.0.1}")
     private String redisHost;
 
-    @Value("${spring.redis.port:6379}")
+    @Value("${spring.data.redis.port:6379}")
     private int redisPort;
 
     @Bean

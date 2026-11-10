@@ -12,6 +12,7 @@ import org.springframework.stereotype.Component;
 import java.time.LocalDateTime;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
@@ -26,16 +27,26 @@ public class CacheClient {
     }
 
     public void set(String key, Object value, Long time, TimeUnit unit) {
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+        // TTL 加 ±10% 随机扰动，避免同一批 key 同时过期造成缓存雪崩
+        long ttlSeconds = jitteredSeconds(time, unit);
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), ttlSeconds, TimeUnit.SECONDS);
     }
 
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
+        long ttlSeconds = jitteredSeconds(time, unit);
         //设置逻辑过期
         RedisData redisData = new RedisData();
         redisData.setData(value);
-        redisData.setExpireTime(LocalDateTime.now().plusSeconds(unit.toSeconds(time)));
+        redisData.setExpireTime(LocalDateTime.now().plusSeconds(ttlSeconds));
         //写入Redis
         stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
+    }
+
+    /** 把 TTL 换算成秒并叠加 ±10% 抖动（至少 ±1 秒）。 */
+    private long jitteredSeconds(Long time, TimeUnit unit) {
+        long seconds = Math.max(1, unit.toSeconds(time));
+        long delta = Math.max(1, seconds / 10);
+        return seconds - delta + ThreadLocalRandom.current().nextLong(delta * 2 + 1);
     }
 
     /**
@@ -78,8 +89,8 @@ public class CacheClient {
             stringRedisTemplate.opsForValue().set(
                     key,
                     "",
-                    RedisConstants.CACHE_NULL_TTL,
-                    TimeUnit.MINUTES
+                    jitteredSeconds(RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES),
+                    TimeUnit.SECONDS
             );
 
             return null;
@@ -209,12 +220,13 @@ public class CacheClient {
             //5. 不存在，返回错误
             if (r == null) {
                 //将空值写入redis
-                stringRedisTemplate.opsForValue().set(key,"", time, unit);
+                stringRedisTemplate.opsForValue().set(key, "",
+                        jitteredSeconds(RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES), TimeUnit.SECONDS);
                 return null;
             }
 
             //6. 存在，写入redis
-            stringRedisTemplate.opsForValue().set(key,JSONUtil.toJsonStr(r), time, unit);
+            this.set(key, r, time, unit);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
         }finally {

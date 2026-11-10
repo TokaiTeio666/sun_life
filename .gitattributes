@@ -1,0 +1,2 @@
+# 课程项目自带的前端静态资源（Vue / Element UI 等第三方构建产物），不计入仓库语言统计
+deploy/frontend/html/** linguist-vendored

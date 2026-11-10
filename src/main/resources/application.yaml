@@ -4,19 +4,20 @@ spring:
   application:
     name: hmdp
   datasource:
-    driver-class-name: com.mysql.jdbc.Driver
+    driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
     username: root
     password: 123456
-  redis:
-    host: 127.0.0.1
-    port: 6379
-    lettuce:
-      pool:
-        max-active: 10
-        max-idle: 10
-        min-idle: 1
-        time-between-eviction-runs: 10s
+  data:
+    redis:
+      host: 127.0.0.1
+      port: 6379
+      lettuce:
+        pool:
+          max-active: 10
+          max-idle: 10
+          min-idle: 1
+          time-between-eviction-runs: 10s
   jackson:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
 rocketmq:
@@ -25,6 +26,9 @@ rocketmq:
     group: seckill-order-producer # 生产者组
 # 业务自定义配置
 hmdp:
+  # 压测开关：false 时商铺详情跳过布隆过滤器与缓存，直接查库（用于 A/B 对比）
+  cache:
+    enabled: true
   order:
     # 订单超时未支付自动关单的延迟等级（RocketMQ 延迟消息，1~18 级）
     # 1s 5s 10s 30s 1m 2m 3m 4m 5m 6m 7m 8m 9m 10m 20m 30m 1h 2h
