@@ -1,8 +1,10 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
-import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
@@ -16,8 +18,12 @@ import com.hmdp.service.IFollowService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.connection.StringRedisConnection;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
@@ -26,26 +32,46 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_BIT_KEY;
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_TOP_KEY;
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_TOP_LIMIT;
 import static com.hmdp.utils.RedisConstants.BLOG_UV_KEY;
+import static com.hmdp.utils.RedisConstants.CACHE_HOT_BLOG_KEY;
+import static com.hmdp.utils.RedisConstants.CACHE_HOT_BLOG_TTL_SECONDS;
 import static com.hmdp.utils.RedisConstants.FEED_KEY;
+import static com.hmdp.utils.RedisConstants.FEED_MAX_SIZE;
 
 /**
- * <p>
- *  服务实现类
- * </p>
+ * 探店笔记服务。
  *
- * @author 虎哥
- * @since 2021-12-22
+ * <p>性能要点：列表类接口批量查询作者（1 次 IN 查询）+ pipeline 批量判断点赞（1 次往返），
+ * 消除逐条 N+1；热门列表短 TTL 缓存；点赞切换用 Lua 原子完成；Feed 推送 pipeline 并截断收件箱。</p>
  */
+@Slf4j
 @Service
 public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IBlogService {
+
+    /**
+     * 原子切换点赞状态：返回切换前的状态（0 = 原来未点赞，本次变为已点赞；1 = 原来已点赞，本次取消）。
+     * KEYS[1] = 位图 key，KEYS[2] = TopN ZSet key；ARGV[1] = userId，ARGV[2] = 当前毫秒，ARGV[3] = TopN 上限
+     */
+    private static final DefaultRedisScript<Long> TOGGLE_LIKE_SCRIPT = new DefaultRedisScript<>(
+            "local old = redis.call('getbit', KEYS[1], ARGV[1]) " +
+            "if old == 0 then " +
+            "  redis.call('setbit', KEYS[1], ARGV[1], 1) " +
+            "  redis.call('zadd', KEYS[2], ARGV[2], ARGV[1]) " +
+            "  redis.call('zremrangebyrank', KEYS[2], tonumber(ARGV[3]), -1) " +
+            "else " +
+            "  redis.call('setbit', KEYS[1], ARGV[1], 0) " +
+            "  redis.call('zrem', KEYS[2], ARGV[1]) " +
+            "end " +
+            "return old", Long.class);
 
     @Resource
     private IUserService userService;
@@ -56,6 +82,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     @Resource
     private IFollowService followService;
 
+    @Resource
+    private ObjectMapper objectMapper;
+
     @Override
     public Result queryBlogById(Long id) {
         //1. 查询blog
@@ -63,74 +92,55 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         if(blog == null){
             return Result.fail("笔记不存在！");
         }
-        //2. 查询blog有关的用户
-        queryBlogUser(blog);
-        //3. 查询blog是否被点赞
-        isBlogLiked(blog);
-        //4. 记录日 UV（HyperLogLog）
+        //2. 作者信息 + 是否点赞
+        fillBlogUsers(List.of(blog));
+        fillBlogLiked(List.of(blog));
+        //3. 记录日 UV（HyperLogLog）
         recordBlogUv(id);
         return Result.ok(blog);
     }
 
+    /**
+     * 热门笔记：按页缓存「笔记 + 作者信息」60s（±10% 抖动），是否点赞因人而异，读缓存后再单独批量判断。
+     * 用 LIMIT 直接取页，不再执行分页插件的 COUNT 查询（前端只用列表）。
+     */
     @Override
     public Result queryHotBlog(Integer current) {
-        // 根据用户查询
-        Page<Blog> page = query()
-                .orderByDesc("liked")
-                .page(new Page<>(current, SystemConstants.MAX_PAGE_SIZE));
-        // 获取当前页数据
-        List<Blog> records = page.getRecords();
-        // 查询用户
-        records.forEach(blog -> {
-            this.queryBlogUser(blog);
-            isBlogLiked(blog);
-        });
-        return Result.ok(records);
-    }
-
-    private void isBlogLiked(Blog blog) {
-        //1. 获取登录用户
-        UserDTO user = UserHolder.getUser();
-        if (user == null) {
-            //用户未登录，无需查询
-            return;
+        int page = current == null || current < 1 ? 1 : current;
+        String key = CACHE_HOT_BLOG_KEY + page;
+        List<Blog> records = readBlogCache(key);
+        if (records == null) {
+            int offset = (page - 1) * SystemConstants.MAX_PAGE_SIZE;
+            records = query()
+                    .orderByDesc("liked")
+                    .last("LIMIT " + offset + "," + SystemConstants.MAX_PAGE_SIZE)
+                    .list();
+            fillBlogUsers(records);
+            writeBlogCache(key, records);
         }
-        Long userId = UserHolder.getUser().getId();
-        //2. 判断当前登录用户是否已经点赞（BitMap：userId 作为 offset）
-        String key = BLOG_LIKED_BIT_KEY + blog.getId();
-        Boolean liked = stringRedisTemplate.opsForValue().getBit(key, userId);
-        blog.setIsLike(Boolean.TRUE.equals(liked));
+        fillBlogLiked(records);
+        return Result.ok(records);
     }
 
     @Override
     public Result likeBlog(Long id) {
-        //1. 获取登录用户
         Long userId = UserHolder.getUser().getId();
-        //2. 判断当前登录用户是否已经点赞（BitMap：userId 作为 offset，1 bit/用户）
         String bitKey = BLOG_LIKED_BIT_KEY + id;
         String topKey = BLOG_LIKED_TOP_KEY + id;
-        boolean liked = Boolean.TRUE.equals(stringRedisTemplate.opsForValue().getBit(bitKey, userId));
-
-        if(!liked){
-            //3. 如果未点赞，可以点赞
-            //3.1 数据库点赞数+1
-            boolean isSuccess = update().setSql("liked = liked + 1").eq("id", id).update();
-            if(isSuccess){
-                //3.2 位图记录点赞关系
-                stringRedisTemplate.opsForValue().setBit(bitKey, userId, true);
-                //3.3 有界 ZSet 只保留最早点赞的前 N 个用户，用于 TopN 展示
-                stringRedisTemplate.opsForZSet().add(topKey, userId.toString(), System.currentTimeMillis());
-                stringRedisTemplate.opsForZSet().removeRange(topKey, BLOG_LIKED_TOP_LIMIT, -1);
-            }
-        }else{
-            //4.如果已点赞，取消点赞
-            //4.1 数据库点赞-1
-            boolean isSuccess = update().setSql("liked = liked - 1").eq("id", id).update();
-            if(isSuccess){
-                //4.2 清除位图并移出 TopN 集合
-                stringRedisTemplate.opsForValue().setBit(bitKey, userId, false);
-                stringRedisTemplate.opsForZSet().remove(topKey, userId.toString());
-            }
+        //1. Redis 原子切换点赞状态（避免 GETBIT + SETBIT 之间并发重复点赞，一次往返完成 bit + TopN）
+        Long old = stringRedisTemplate.execute(TOGGLE_LIKE_SCRIPT, List.of(bitKey, topKey),
+                userId.toString(), String.valueOf(System.currentTimeMillis()), String.valueOf(BLOG_LIKED_TOP_LIMIT));
+        boolean nowLiked = old != null && old == 0L;
+        //2. 只有状态确实变化时才更新 DB 点赞数
+        boolean isSuccess = update()
+                .setSql(nowLiked ? "liked = liked + 1" : "liked = liked - 1")
+                .eq("id", id)
+                .update();
+        if (!isSuccess) {
+            // 笔记不存在：把 Redis 状态切回去
+            stringRedisTemplate.execute(TOGGLE_LIKE_SCRIPT, List.of(bitKey, topKey),
+                    userId.toString(), String.valueOf(System.currentTimeMillis()), String.valueOf(BLOG_LIKED_TOP_LIMIT));
+            return Result.fail("笔记不存在！");
         }
         return Result.ok();
     }
@@ -140,6 +150,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         //查询top5的点赞用户 zrange key 0 4
         String key = BLOG_LIKED_TOP_KEY + id;
         Set<String> top5 = stringRedisTemplate.opsForZSet().range(key, 0, 4);
+        if (top5 == null || top5.isEmpty()) {
+            return Result.ok(Collections.emptyList());
+        }
         //解析出期中的用户id
         List<Long> ids = top5.stream().map(Long::valueOf).collect(Collectors.toList());
         String idStr = StrUtil.join(",", ids);
@@ -163,15 +176,24 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         if(!isSuccess){
             return Result.fail("新增笔记失败!");
         }
-        // 3.查询笔记作者的所有粉丝 select * from tb_follow where follow_user_id = ?
-        List<Follow> follows = followService.query().eq("follow_user_id", user.getId()).list();
-        // 4.推送笔记id给所有粉丝
-        for (Follow follow : follows) {
-            // 4.1.获取粉丝id
-            Long userId = follow.getUserId();
-            // 4.2.推送
-            String key = FEED_KEY + userId;
-            stringRedisTemplate.opsForZSet().add(key, blog.getId().toString(), System.currentTimeMillis());
+        // 3.查询笔记作者的所有粉丝（只取 user_id，走 idx_follow_user 索引）
+        List<Follow> follows = followService.query()
+                .select("user_id")
+                .eq("follow_user_id", user.getId())
+                .list();
+        // 4.pipeline 一次往返推送给所有粉丝，并把每个收件箱截断到最近 FEED_MAX_SIZE 条
+        if (!follows.isEmpty()) {
+            String blogId = blog.getId().toString();
+            double score = System.currentTimeMillis();
+            stringRedisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+                StringRedisConnection conn = (StringRedisConnection) connection;
+                for (Follow follow : follows) {
+                    String key = FEED_KEY + follow.getUserId();
+                    conn.zAdd(key, score, blogId);
+                    conn.zRemRange(key, 0, -(FEED_MAX_SIZE + 1));
+                }
+                return null;
+            });
         }
         // 5.返回id
         return Result.ok(blog.getId());
@@ -184,19 +206,17 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         // 2.查询收件箱 ZREVRANGEBYSCORE key Max Min LIMIT offset count
         String key = FEED_KEY + userId;
         Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
-                .reverseRangeByScoreWithScores(key, 0, max, offset, 2);
+                .reverseRangeByScoreWithScores(key, 0, max, offset, SystemConstants.DEFAULT_PAGE_SIZE);
         // 3.非空判断
         if (typedTuples == null || typedTuples.isEmpty()) {
             return Result.ok();
         }
         // 4.解析数据：blogId、minTime（时间戳）、offset
         List<Long> ids = new ArrayList<>(typedTuples.size());
-        long minTime = 0; // 2
-        int os = 1; // 2
-        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) { // 5 4 4 2 2
-            // 4.1.获取id
+        long minTime = 0;
+        int os = 1;
+        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) {
             ids.add(Long.valueOf(tuple.getValue()));
-            // 4.2.获取分数(时间戳）
             long time = tuple.getScore().longValue();
             if(time == minTime){
                 os++;
@@ -206,16 +226,11 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             }
         }
         os = minTime == max ? os : os + offset;
-        // 5.根据id查询blog
+        // 5.根据id查询blog，批量补充作者与点赞状态
         String idStr = StrUtil.join(",", ids);
         List<Blog> blogs = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
-
-        for (Blog blog : blogs) {
-            // 5.1.查询blog有关的用户
-            queryBlogUser(blog);
-            // 5.2.查询blog是否被点赞
-            isBlogLiked(blog);
-        }
+        fillBlogUsers(blogs);
+        fillBlogLiked(blogs);
 
         // 6.封装并返回
         ScrollResult r = new ScrollResult();
@@ -228,6 +243,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
     /**
      * 记录笔记日 UV：HyperLogLog 按天聚合，固定约 12KB/键，标准误差约 0.81%。
+     * PFADD + EXPIRE 用 pipeline 一次往返。
      */
     private void recordBlogUv(Long id) {
         UserDTO user = UserHolder.getUser();
@@ -235,9 +251,14 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             return;
         }
         String key = BLOG_UV_KEY + id + ":" + today();
-        stringRedisTemplate.opsForHyperLogLog().add(key, user.getId().toString());
-        // UV 只保留 35 天，过期自动清理
-        stringRedisTemplate.expire(key, 35, TimeUnit.DAYS);
+        String uid = user.getId().toString();
+        stringRedisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            StringRedisConnection conn = (StringRedisConnection) connection;
+            conn.pfAdd(key, uid);
+            // UV 只保留 35 天，过期自动清理
+            conn.expire(key, TimeUnit.DAYS.toSeconds(35));
+            return null;
+        });
     }
 
     @Override
@@ -254,12 +275,67 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         return LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
     }
 
-    private void queryBlogUser(Blog blog) {
-        Long userId = blog.getUserId();
-        User user = userService.getById(userId);
-        blog.setName(user.getNickName());
-        blog.setIcon(user.getIcon());
+    /** 批量补充作者昵称与头像：一次 IN 查询替代逐条 getById */
+    private void fillBlogUsers(List<Blog> blogs) {
+        if (blogs.isEmpty()) {
+            return;
+        }
+        Set<Long> userIds = blogs.stream().map(Blog::getUserId).collect(Collectors.toSet());
+        Map<Long, User> users = userService.query()
+                .select("id", "nick_name", "icon")
+                .in("id", userIds)
+                .list()
+                .stream()
+                .collect(Collectors.toMap(User::getId, Function.identity()));
+        for (Blog blog : blogs) {
+            User user = users.get(blog.getUserId());
+            if (user != null) {
+                blog.setName(user.getNickName());
+                blog.setIcon(user.getIcon());
+            }
+        }
     }
 
+    /** 批量判断当前用户是否点赞：pipeline 一次往返完成 N 个 GETBIT */
+    private void fillBlogLiked(List<Blog> blogs) {
+        UserDTO user = UserHolder.getUser();
+        if (user == null || blogs.isEmpty()) {
+            return;
+        }
+        long userId = user.getId();
+        List<Object> results = stringRedisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            StringRedisConnection conn = (StringRedisConnection) connection;
+            for (Blog blog : blogs) {
+                conn.getBit(BLOG_LIKED_BIT_KEY + blog.getId(), userId);
+            }
+            return null;
+        });
+        for (int i = 0; i < blogs.size(); i++) {
+            blogs.get(i).setIsLike(Boolean.TRUE.equals(results.get(i)));
+        }
+    }
 
+    private List<Blog> readBlogCache(String key) {
+        String json = stringRedisTemplate.opsForValue().get(key);
+        if (json == null) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<List<Blog>>() {});
+        } catch (Exception e) {
+            log.warn("热门笔记缓存反序列化失败，回源 DB key={}", key, e);
+            return null;
+        }
+    }
+
+    private void writeBlogCache(String key, List<Blog> blogs) {
+        try {
+            // TTL ±10% 抖动，避免各页同时失效
+            long base = CACHE_HOT_BLOG_TTL_SECONDS;
+            long ttl = base + RandomUtil.randomLong(-base / 10, base / 10 + 1);
+            stringRedisTemplate.opsForValue().set(key, objectMapper.writeValueAsString(blogs), ttl, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("热门笔记缓存写入失败 key={}", key, e);
+        }
+    }
 }

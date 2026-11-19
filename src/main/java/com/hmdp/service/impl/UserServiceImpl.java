@@ -65,7 +65,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, LOGIN_CODE_TTL , TimeUnit.MINUTES);
 
         // 5.发送验证码
-        log.debug("发送短信验证码成功，验证码：{}", code);
+        // 模拟短信：真实环境替换为短信服务商 SDK 调用。用 info 级别，便于本地从日志取验证码
+        log.info("发送短信验证码成功，验证码：{}", code);
 
         // 返回ok
         return Result.ok();
@@ -111,11 +112,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
                 CopyOptions.create()//自定义选择
                         .setIgnoreNullValue(true)//忽略一些空的值
                         .setFieldValueEditor((fieldName, fieldValue) -> fieldValue.toString()));
-        // 7.3.存储
+        userMap.put(LOGIN_REFRESH_AT_FIELD, String.valueOf(System.currentTimeMillis()));
+        // 7.3.存储 + 设置有效期：pipeline 一次往返
         String tokenKey = LOGIN_USER_KEY + token;
-        stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
-        // 7.4.设置token有效期
-        stringRedisTemplate.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.MINUTES);
+        stringRedisTemplate.executePipelined(new org.springframework.data.redis.core.SessionCallback<Object>() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public Object execute(org.springframework.data.redis.core.RedisOperations operations) {
+                operations.opsForHash().putAll(tokenKey, userMap);
+                operations.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.MINUTES);
+                return null;
+            }
+        });
         // 8.返回token
         return Result.ok(token);
     }

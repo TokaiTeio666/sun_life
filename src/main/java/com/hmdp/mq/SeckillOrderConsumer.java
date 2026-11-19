@@ -6,17 +6,26 @@ import com.hmdp.service.IVoucherOrderService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.support.Acknowledgment;
+import org.springframework.kafka.listener.BatchListenerFailedException;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * 秒杀订单 Kafka 消费者。
+ * 秒杀订单 Kafka 批量消费者。
  *
- * <p>手动提交位点：订单创建成功后才 ack；抛异常时由 DefaultErrorHandler 重试，
- * 重试耗尽后进入 {@code seckill.orders.DLT} 死信主题。</p>
+ * <p>快速路径：一次 poll 的整批消息在一个事务里按券聚合扣库存 + 批量插入订单，
+ * 热点库存行的加锁次数从「每条 1 次」降为「每批每券 1 次」。</p>
+ *
+ * <p>降级路径：快速路径失败（如脏消息、库存不一致）时逐条处理；某条仍失败则抛
+ * {@link BatchListenerFailedException}，容器会提交它之前的位点，从这条开始按
+ * DefaultErrorHandler 重试，耗尽后投递 {@code seckill.orders.DLT}。</p>
+ *
+ * <p>不再使用 Redisson 用户锁：userId 作为消息 key 保证同一用户落在同一分区串行消费；
+ * 重复投递靠订单 id 主键幂等。原实现拿锁失败直接 ack，会丢掉已在 Redis 扣过库存的订单。</p>
  */
 @Slf4j
 @Component
@@ -25,40 +34,57 @@ public class SeckillOrderConsumer {
     @Resource
     private IVoucherOrderService voucherOrderService;
 
-    @Resource
-    private RedissonClient redissonClient;
-
     @KafkaListener(
             topics = KafkaConstants.SECKILL_ORDER_TOPIC,
             groupId = KafkaConstants.SECKILL_ORDER_GROUP,
+            containerFactory = "seckillBatchListenerFactory",
             concurrency = "${hmdp.kafka.consumer.concurrency:3}"
     )
-    public void onMessage(ConsumerRecord<String, String> record, Acknowledgment ack) {
-        SeckillOrderMessage message = JSONUtil.toBean(record.value(), SeckillOrderMessage.class);
-        log.debug("收到秒杀订单消息 partition={} offset={} message={}",
-                record.partition(), record.offset(), message);
-
-        //1. 同一用户加分布式锁，防止并发重复下单
-        RLock lock = redissonClient.getLock("lock:order:" + message.getUserId());
-        boolean isLock = lock.tryLock();
-        if (!isLock) {
-            // 重复消息直接确认，避免无意义重试
-            log.warn("不允许重复下单 userId={}", message.getUserId());
-            ack.acknowledge();
+    public void onMessages(List<ConsumerRecord<String, String>> records) {
+        if (records.isEmpty()) {
             return;
         }
+        //1. 快速路径：整批解析 + 单事务批量落库
         try {
-            VoucherOrder voucherOrder = new VoucherOrder()
-                    .setId(message.getId())
-                    .setUserId(message.getUserId())
-                    .setVoucherId(message.getVoucherId())
-                    .setStatus(1);
-            //2. 创建订单（内部做幂等判断 + DB 库存条件扣减）
-            voucherOrderService.createVoucherOrder(voucherOrder);
-            //3. 成功后才提交位点
-            ack.acknowledge();
-        } finally {
-            lock.unlock();
+            List<VoucherOrder> orders = new ArrayList<>(records.size());
+            for (ConsumerRecord<String, String> record : records) {
+                orders.add(toOrder(record));
+            }
+            List<VoucherOrder> created = voucherOrderService.createVoucherOrdersBatch(orders);
+            voucherOrderService.cacheOrderStatus(created);
+            log.debug("批量创建秒杀订单 received={} created={}", records.size(), created.size());
+            return;
+        } catch (Exception e) {
+            log.warn("批量创建秒杀订单失败，降级为逐条处理 size={} cause={}", records.size(), e.toString());
         }
+
+        //2. 降级路径：逐条处理，定位失败消息
+        for (int i = 0; i < records.size(); i++) {
+            ConsumerRecord<String, String> record = records.get(i);
+            try {
+                VoucherOrder order = toOrder(record);
+                try {
+                    if (voucherOrderService.createVoucherOrder(order)) {
+                        voucherOrderService.cacheOrderStatus(List.of(order));
+                    }
+                } catch (DuplicateKeyException dup) {
+                    log.info("订单已存在，跳过重复消费 orderId={}", order.getId());
+                }
+            } catch (Exception e) {
+                throw new BatchListenerFailedException("秒杀订单消费失败 offset=" + record.offset(), e, i);
+            }
+        }
+    }
+
+    private VoucherOrder toOrder(ConsumerRecord<String, String> record) {
+        SeckillOrderMessage message = JSONUtil.toBean(record.value(), SeckillOrderMessage.class);
+        if (message.getId() == null || message.getUserId() == null || message.getVoucherId() == null) {
+            throw new IllegalArgumentException("非法秒杀订单消息: " + record.value());
+        }
+        return new VoucherOrder()
+                .setId(message.getId())
+                .setUserId(message.getUserId())
+                .setVoucherId(message.getVoucherId())
+                .setStatus(1);
     }
 }

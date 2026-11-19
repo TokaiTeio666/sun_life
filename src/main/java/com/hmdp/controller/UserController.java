@@ -50,8 +50,25 @@ public class UserController {
      * 发送手机验证码
      */
     @PostMapping("code")
-    public Result sendCode(String phone, HttpSession session) {
-        // 实现发送验证码功能
+    public Result sendCode(String phone, HttpSession session, HttpServletRequest request) {
+        // 限流：同一手机号 60s 内只能发 1 次（SET NX EX，原子）
+        if (StrUtil.isNotBlank(phone)) {
+            Boolean first = stringRedisTemplate.opsForValue().setIfAbsent(
+                    RedisConstants.LOGIN_CODE_LIMIT_PHONE_KEY + phone, "1", java.time.Duration.ofSeconds(60));
+            if (!Boolean.TRUE.equals(first)) {
+                return Result.fail("验证码发送过于频繁，请稍后再试");
+            }
+        }
+        // 限流：同一 IP 每小时最多 20 次（nginx 透传 X-Real-IP）
+        String ip = StrUtil.blankToDefault(request.getHeader("X-Real-IP"), request.getRemoteAddr());
+        String ipKey = RedisConstants.LOGIN_CODE_LIMIT_IP_KEY + ip;
+        Long count = stringRedisTemplate.opsForValue().increment(ipKey);
+        if (count != null && count == 1L) {
+            stringRedisTemplate.expire(ipKey, java.time.Duration.ofHours(1));
+        }
+        if (count != null && count > 20) {
+            return Result.fail("请求过于频繁，请稍后再试");
+        }
         return userService.sendCode(phone,session);
     }
     /**

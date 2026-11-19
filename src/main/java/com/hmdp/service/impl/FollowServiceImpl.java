@@ -49,7 +49,13 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
             Follow follow = new Follow();
             follow.setUserId(userId);
             follow.setFollowUserId(followUserId);
-            boolean isSuccess = save(follow);
+            boolean isSuccess;
+            try {
+                isSuccess = save(follow);
+            } catch (org.springframework.dao.DuplicateKeyException e) {
+                // uk_user_follow 唯一索引：重复关注视为成功（幂等）
+                isSuccess = true;
+            }
             if (isSuccess) {
                 // 把关注用户的id，放入redis的set集合 sadd userId followerUserId
                 stringRedisTemplate.opsForSet().add(key, followUserId.toString());
@@ -72,8 +78,21 @@ public class FollowServiceImpl extends ServiceImpl<FollowMapper, Follow> impleme
             return Result.fail("用户未登录");
         }
         Long userId = UserHolder.getUser().getId();
-        Long count = query().eq("user_id", userId).eq("follow_user_id", followUserId).count();
-        return Result.ok(count > 0);
+        String key = "follows:" + userId;
+        // 优先查 Redis 关注集合（关注/取关时同步维护）；集合不存在时回源 DB 并重建
+        Boolean member = stringRedisTemplate.opsForSet().isMember(key, followUserId.toString());
+        if (Boolean.TRUE.equals(member)) {
+            return Result.ok(true);
+        }
+        if (Boolean.TRUE.equals(stringRedisTemplate.hasKey(key))) {
+            return Result.ok(false);
+        }
+        List<Follow> follows = query().select("follow_user_id").eq("user_id", userId).list();
+        if (!follows.isEmpty()) {
+            stringRedisTemplate.opsForSet().add(key, follows.stream()
+                    .map(f -> f.getFollowUserId().toString()).toArray(String[]::new));
+        }
+        return Result.ok(follows.stream().anyMatch(f -> followUserId.equals(f.getFollowUserId())));
     }
 
     @Override
