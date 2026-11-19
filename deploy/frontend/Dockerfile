@@ -6,5 +6,6 @@ COPY html/ /usr/share/nginx/html/
 
 # 容器化 nginx 配置：静态页 + /api 反向代理到后端 app:8081
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY proxy_common.inc /etc/nginx/conf.d/proxy_common.inc
 
 EXPOSE 80

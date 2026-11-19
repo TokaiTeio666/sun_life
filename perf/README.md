@@ -38,6 +38,8 @@ pwsh perf/gen_tokens.ps1 -Count 1000
 docker exec hmdp-mysql mysql -uroot -p123456 hmdp -e "DELETE FROM tb_voucher_order WHERE voucher_id=21; UPDATE tb_seckill_voucher SET stock=100000 WHERE voucher_id=21;"
 docker exec hmdp-redis redis-cli SET seckill:stock:21 100000
 docker exec hmdp-redis redis-cli DEL seckill:order:21
+# 活动时间缓存（seckill:time:21）在应用启动时预热；压测券在启动后才导入时删掉即可，key 不存在时 Lua 跳过时间校验
+docker exec hmdp-redis redis-cli DEL seckill:time:21
 ```
 
 ## 2. 秒杀接口（Kafka 异步下单）
@@ -75,7 +77,7 @@ docker exec hmdp-redis redis-cli GET seckill:stock:21
 
 ```powershell
 'not-json' | docker exec -i hmdp-kafka /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic seckill.orders
-docker logs hmdp-app --since 20s 2>&1 | Select-String '死信'
+docker compose -f deploy/docker-compose.yml logs app --since 20s 2>&1 | Select-String '死信'
 ```
 
 ## 3. 商铺详情缓存 A/B

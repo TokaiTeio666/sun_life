@@ -103,16 +103,40 @@ public class CacheClient {
         return r;
     }
 
-    private  boolean tryLock(String key){
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+    /** 锁持有者标识：每次加锁生成唯一值，解锁时比对，避免误删其他线程/实例的锁 */
+    private static final org.springframework.data.redis.core.script.DefaultRedisScript<Long> UNLOCK_SCRIPT;
+    static {
+        UNLOCK_SCRIPT = new org.springframework.data.redis.core.script.DefaultRedisScript<>();
+        UNLOCK_SCRIPT.setLocation(new org.springframework.core.io.ClassPathResource("unlock.lua"));
+        UNLOCK_SCRIPT.setResultType(Long.class);
+    }
+
+    private boolean tryLock(String key, String owner){
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, owner, 10, TimeUnit.SECONDS);
         return BooleanUtil.isTrue(flag);
     }
 
-    private void unLock(String key){
-        stringRedisTemplate.delete(key);
+    private void unLock(String key, String owner){
+        stringRedisTemplate.execute(UNLOCK_SCRIPT, java.util.Collections.singletonList(key), owner);
     }
 
-    private static final ExecutorService CACHE_REBUILD_EXECUTOR =  Executors.newFixedThreadPool(10);
+    /**
+     * 逻辑过期的异步重建线程池：有界队列 + 丢弃策略（重建任务丢了无妨，下个请求会再触发），
+     * 守护线程不阻塞 JVM 退出。替代原来无界队列的 newFixedThreadPool。
+     */
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = new java.util.concurrent.ThreadPoolExecutor(
+            2, 4, 60, TimeUnit.SECONDS,
+            new java.util.concurrent.ArrayBlockingQueue<>(200),
+            r -> {
+                Thread t = new Thread(r, "cache-rebuild");
+                t.setDaemon(true);
+                return t;
+            },
+            new java.util.concurrent.ThreadPoolExecutor.DiscardPolicy());
+
+    /** 互斥锁等待重试次数与间隔：最多等待约 1s，超时直接回源，避免无限递归 */
+    private static final int MUTEX_MAX_RETRIES = 20;
+    private static final long MUTEX_RETRY_SLEEP_MS = 50;
 
     /**
      * 逻辑过期
@@ -149,7 +173,8 @@ public class CacheClient {
         //5.2 已过期，需要缓存重建
         //6.1 获取互斥锁
         String lockKey = "lock:" + keyPerfix + id;
-        boolean isLock = tryLock(lockKey);
+        String owner = java.util.UUID.randomUUID().toString();
+        boolean isLock = tryLock(lockKey, owner);
 
         //6.2 判断是否获取成功
         if (isLock) {
@@ -164,7 +189,7 @@ public class CacheClient {
                     throw new RuntimeException(e);
                 } finally {
                     //释放锁
-                    unLock(lockKey);
+                    unLock(lockKey, owner);
                 }
             });
         }
@@ -187,54 +212,50 @@ public class CacheClient {
      */
     public <R,ID> R queryWithMutex(String keyPerfix, ID id, Class<R> type, Function<ID,R> dbFallback, Long time, TimeUnit unit) {
         String key = keyPerfix + id;
-        //1. 从redis查询商城缓存
-        String json = stringRedisTemplate.opsForValue().get(key);
-        //2. 判断是否存在
-        if (StrUtil.isNotBlank(json)) {
-            //3. 存在，直接返回
-            return JSONUtil.toBean(json, type);
-        }
-
-        //判断命中是否是空值
-        if (json != null) {
-            // 返回一个错误信息
-            return null;
-        }
-
-        //4. 实现缓存重建
-        //4.1 获取互斥锁
         String lockKey = "lock:" + keyPerfix + id;
-        boolean isLock = tryLock(lockKey);
-        R r = null;
-        try {
-            //4.2 判断是否获取成功
-            if (!isLock) {
-                //4.3 失败，则休眠并重试
-                Thread.sleep(50);
-                return queryWithMutex(keyPerfix, id, type, dbFallback, time, unit);
+        for (int attempt = 0; attempt <= MUTEX_MAX_RETRIES; attempt++) {
+            //1. 查缓存：命中真实值直接返回；命中空值说明不存在
+            String json = stringRedisTemplate.opsForValue().get(key);
+            if (StrUtil.isNotBlank(json)) {
+                return JSONUtil.toBean(json, type);
             }
-
-            //4.4. 成功，根据id查询数据库
-            r = dbFallback.apply(id);
-
-            //5. 不存在，返回错误
-            if (r == null) {
-                //将空值写入redis
-                stringRedisTemplate.opsForValue().set(key, "",
-                        jitteredSeconds(RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES), TimeUnit.SECONDS);
+            if (json != null) {
                 return null;
             }
 
-            //6. 存在，写入redis
-            this.set(key, r, time, unit);
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
-        }finally {
-            //7. 释放互斥锁
-            unLock(lockKey);
+            //2. 未命中：只有拿到锁的一个请求回源 DB，其余请求短暂等待后重查缓存
+            String owner = java.util.UUID.randomUUID().toString();
+            if (!tryLock(lockKey, owner)) {
+                try {
+                    Thread.sleep(MUTEX_RETRY_SLEEP_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                continue;
+            }
+            try {
+                //3. 双重检查：等锁期间其他请求可能已经重建好缓存
+                json = stringRedisTemplate.opsForValue().get(key);
+                if (StrUtil.isNotBlank(json)) {
+                    return JSONUtil.toBean(json, type);
+                }
+                //4. 回源 DB 并写缓存（空值也缓存，防穿透）
+                R r = dbFallback.apply(id);
+                if (r == null) {
+                    stringRedisTemplate.opsForValue().set(key, "",
+                            jitteredSeconds(RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES), TimeUnit.SECONDS);
+                    return null;
+                }
+                this.set(key, r, time, unit);
+                return r;
+            } finally {
+                //5. 只释放自己持有的锁
+                unLock(lockKey, owner);
+            }
         }
-
-        //8. 返回
-        return r;
+        //等锁超时（重建方异常或极慢）：直接回源，保证可用性
+        log.warn("互斥锁等待超时，直接回源 key={}", key);
+        return dbFallback.apply(id);
     }
 }

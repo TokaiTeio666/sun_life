@@ -72,11 +72,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.fail("店铺不存在！");
         }
 
-        // 互斥锁解决缓存击穿
-        //Shop shop = cacheClient.queryWithMutex(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
-
-        //解决缓存穿透
-        Shop shop = cacheClient.queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class,
+        // 互斥锁防击穿（含空值缓存防穿透）：热点 key 过期时只有一个请求回源 DB
+        Shop shop = cacheClient.queryWithMutex(CACHE_SHOP_KEY, id, Shop.class,
                 shopId -> {
                     Shop fromDb = getById(shopId);
                     // 布隆过滤器不支持删除，新增商铺在 DB 命中后补写

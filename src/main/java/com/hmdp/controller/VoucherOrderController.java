@@ -2,7 +2,6 @@ package com.hmdp.controller;
 
 
 import com.hmdp.dto.Result;
-import com.hmdp.entity.VoucherOrder;
 import com.hmdp.service.IVoucherOrderService;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -38,11 +37,7 @@ public class VoucherOrderController {
      */
     @GetMapping("status/{orderId}")
     public Result queryOrderStatus(@PathVariable("orderId") Long orderId) {
-        VoucherOrder order = voucherOrderService.getById(orderId);
-        if (order == null) {
-            return Result.ok(0);
-        }
-        return Result.ok(order.getStatus());
+        return Result.ok(voucherOrderService.queryOrderStatus(orderId));
     }
 
     /**

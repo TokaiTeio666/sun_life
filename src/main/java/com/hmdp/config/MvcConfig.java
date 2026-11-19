@@ -22,7 +22,7 @@ public class MvcConfig implements WebMvcConfigurer {
                     "/shop/**",
                     "/voucher/**",
                     "/shop-type/**",
-                    "/upload/**",
+                    // 上传/删除图片需要登录（原先放行导致匿名可上传、删除文件）
                     "/blog/hot",
                     "/user/code",
                     "/user/login"

@@ -40,12 +40,25 @@ public class SeckillStockInitializer implements CommandLineRunner {
         int initCount = 0;
         for (SeckillVoucher v : vouchers) {
             String key = RedisConstants.SECKILL_STOCK_KEY + v.getVoucherId();
-            Boolean exists = stringRedisTemplate.hasKey(key);
-            if (Boolean.FALSE.equals(exists)) {
-                stringRedisTemplate.opsForValue().set(key, String.valueOf(v.getStock()));
+            // SETNX：多实例同时启动也只会有一个写入，且不会覆盖已扣减的库存
+            if (Boolean.TRUE.equals(stringRedisTemplate.opsForValue().setIfAbsent(key, String.valueOf(v.getStock())))) {
                 initCount++;
             }
+            // 活动时间每次启动都同步（幂等覆盖），供 seckill.lua 校验
+            cacheSeckillTime(stringRedisTemplate, v.getVoucherId(), v.getBeginTime(), v.getEndTime());
         }
         log.info("秒杀库存预热完成：有效秒杀券 {} 张，初始化 {} 张到 Redis", vouchers.size(), initCount);
+    }
+
+    /** 写入秒杀活动时间（epoch 毫秒） */
+    public static void cacheSeckillTime(StringRedisTemplate template, Long voucherId,
+                                        LocalDateTime begin, LocalDateTime end) {
+        if (begin == null || end == null) {
+            return;
+        }
+        java.time.ZoneId zone = java.time.ZoneId.systemDefault();
+        template.opsForHash().putAll(RedisConstants.SECKILL_TIME_KEY + voucherId, java.util.Map.of(
+                "begin", String.valueOf(begin.atZone(zone).toInstant().toEpochMilli()),
+                "end", String.valueOf(end.atZone(zone).toInstant().toEpochMilli())));
     }
 }

@@ -250,8 +250,8 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 | `mysql` | mysql:8.0 | 首次启动自动导入 `hmdp.sql` 建库建表（关闭严格模式兼容课程 SQL），数据卷 `hmdp-mysql8-data` |
 | `redis` | redis:7.2 | 缓存/布隆过滤器/位图/HLL/锁/库存 |
 | `kafka` | apache/kafka:3.7.0 | KRaft 单节点，秒杀异步消息 / 重试 / DLT |
-| `app` | 本地构建（eclipse-temurin:17-jre） | Spring Boot 3 应用，环境变量自动指向容器服务名 |
-| `frontend` | nginx:1.18-alpine | 黑马点评前端静态页 + `/api` 反向代理到 `app:8081` |
+| `app` | 本地构建（eclipse-temurin:17-jre） | Spring Boot 3 应用，无状态，可 `--scale app=N` 多副本 |
+| `frontend` | nginx:1.18-alpine | 前端静态页 + 网关：`/api`（8080）与 8081 入口均负载均衡到所有 `app` 副本，秒杀接口限流 |
 
 > 访问方式：
 > - **前端页面（推荐）**：浏览器打开 `http://localhost:8080`（nginx 托管，登录/秒杀均在页面操作）
@@ -260,6 +260,9 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 > 端口映射默认避开本机冲突（MySQL 3307、Redis 6380、Kafka 9092），
 > 可在 `deploy/.env` 中修改；应用宿主端口默认 8081（`APP_PORT`）、前端端口默认 8080（`WEB_PORT`）。
 > 秒杀库存由应用启动时自动预热（见 4.1 可靠性设计 / `SeckillStockInitializer`），无需手动初始化。
+> 扩容到多副本：`docker compose -f deploy/docker-compose.yml up -d --scale app=3`，之后 `restart frontend` 让 nginx 重新解析副本。
+> 已有数据卷的环境需补索引：`docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/migration_v2.sql`。
+> 扩容路线与各阶段优化说明见 [docs/scaling-roadmap.md](docs/scaling-roadmap.md)。
 >
 > **实测记录**（Docker Desktop 4.91 + WSL2 后端）：
 > 一键启动后 5 个服务全部健康；前端 `localhost:8080` 页面可访问，经 `/api` 代理登录 → 秒杀下单 → Kafka
