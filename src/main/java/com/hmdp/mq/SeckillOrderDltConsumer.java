@@ -1,5 +1,7 @@
 package com.hmdp.mq;
 
+import com.hmdp.metrics.BizMetrics;
+import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -13,6 +15,9 @@ import org.springframework.stereotype.Component;
 @Component
 public class SeckillOrderDltConsumer {
 
+    @Resource
+    private BizMetrics bizMetrics;
+
     @KafkaListener(
             topics = KafkaConstants.SECKILL_ORDER_DLT_TOPIC,
             groupId = KafkaConstants.SECKILL_ORDER_DLT_GROUP
@@ -20,6 +25,7 @@ public class SeckillOrderDltConsumer {
     public void onDeadLetter(ConsumerRecord<String, String> record, Acknowledgment ack) {
         log.error("秒杀订单进入死信 topic={} partition={} offset={} key={} value={}",
                 record.topic(), record.partition(), record.offset(), record.key(), record.value());
+        bizMetrics.deadLetter();
         ack.acknowledge();
     }
 }

@@ -1,0 +1,64 @@
+# ========== sun_life 链路追踪（SkyWalking，阶段 3-1 监控体系） ==========
+# 用途：定位慢接口耗在 Redis、MySQL 还是 Kafka 哪一段。Java agent 零侵入，不改业务代码。
+# 与主编排（可再叠加监控编排）一起使用：
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml \
+#                  -f deploy/docker-compose.tracing.yml up -d --build
+# 访问：SkyWalking UI http://localhost:8088
+#
+# 注意：
+# - OAP 本身较重（建议额外 1.5G 内存），这里用 H2 内存存储，只适合本地 / 压测环境排查，重启即丢数据；
+#   生产用 BanyanDB 或 Elasticsearch。
+# - agent 有一定开销（通常 < 5% CPU），做容量基线的「拐点」压测时不要叠加本文件，排查慢接口时再打开。
+
+services:
+  # 一次性容器：把 agent 拷进共享卷，供 app 各副本挂载；
+  # 同时启用 trace-ignore 插件，忽略 Prometheus 每 5s 一次的 /actuator 抓取，避免污染链路数据
+  skywalking-agent:
+    image: apache/skywalking-java-agent:9.3.0-java17
+    container_name: hmdp-skywalking-agent
+    entrypoint: ["sh", "-c", "cp -r /skywalking/agent/. /agent/ && cp /agent/optional-plugins/apm-trace-ignore-plugin-*.jar /agent/plugins/"]
+    volumes:
+      - skywalking-agent:/agent
+    restart: "no"
+
+  skywalking-oap:
+    restart: unless-stopped
+    image: apache/skywalking-oap-server:10.1.0
+    container_name: hmdp-skywalking-oap
+    environment:
+      SW_STORAGE: h2
+      SW_CORE_RECORD_DATA_TTL: 2
+      SW_CORE_METRICS_DATA_TTL: 2   # 10.x 要求至少 2 天
+      JAVA_OPTS: "-Xms512m -Xmx1g"
+      TZ: Asia/Shanghai
+
+  skywalking-ui:
+    restart: unless-stopped
+    image: apache/skywalking-ui:10.1.0
+    container_name: hmdp-skywalking-ui
+    environment:
+      SW_OAP_ADDRESS: http://skywalking-oap:12800
+      TZ: Asia/Shanghai
+    ports:
+      - "${SKYWALKING_UI_PORT:-8088}:8080"
+    depends_on:
+      - skywalking-oap
+
+  # 覆盖 app：挂载 agent 并通过 -javaagent 启用
+  app:
+    environment:
+      # skywalking.trace.ignore_path：trace-ignore 插件读取的系统属性（不读环境变量）
+      JAVA_OPTS: "-javaagent:/skywalking/agent/skywalking-agent.jar -Dskywalking.trace.ignore_path=GET:/actuator/** -Xms256m -Xmx512m -Dfile.encoding=UTF-8"
+      SW_AGENT_NAME: "sun_life::hmdp"
+      SW_AGENT_COLLECTOR_BACKEND_SERVICES: "skywalking-oap:11800"
+      # SQL 参数默认不采集，排查时可打开（注意参数里可能有手机号等敏感信息）
+      SW_JDBC_TRACE_SQL_PARAMETERS: "false"
+    volumes:
+      - skywalking-agent:/skywalking/agent:ro
+    depends_on:
+      skywalking-agent:
+        condition: service_completed_successfully
+
+volumes:
+  skywalking-agent:
+    name: hmdp-skywalking-agent

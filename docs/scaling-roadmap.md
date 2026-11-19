@@ -8,7 +8,7 @@
 | 0 | — | 先修正确性 bug，扩容前必须做 | ✅ 已落地 |
 | 1 | 单机 QPS 1–3 万 | 减少每个请求的 IO 次数：索引、批量、pipeline、缓存、连接池 | ✅ 已落地 |
 | 2 | 十万级 QPS | 应用无状态化 + 多副本 + 网关负载均衡与限流 | ✅ 已落地 |
-| 3 | 百万级 QPS / 亿级数据 | 存储层拆分：读写分离、分库分表、集群化、多级缓存 | 📄 方案 |
+| 3 | 百万级 QPS / 亿级数据 | 存储层拆分：读写分离、分库分表、集群化、多级缓存 | 🚧 3-1 评估规划已落地（监控 + 基线工具），基线待实测；3-2 起为方案 |
 
 ---
 
@@ -73,7 +73,7 @@ DB 库存 = Redis 库存；约 2000 笔订单只执行了约 83 次库存 UPDATE
 
 单机 MySQL / Redis / Kafka 成为瓶颈后，逐项拆分。**按监控数据决定先拆哪个，不要一次全上。**
 
-### 3.1 先上监控（拆分的依据）
+### 3.1 先上监控（拆分的依据）——✅ 已落地，见 [monitoring.md](monitoring.md)；容量基线工具见 [../perf/baseline/README.md](../perf/baseline/README.md)
 - Prometheus + Grafana：JVM、Hikari 活跃连接/等待、Redis 命中率/慢查询、Kafka 消费 lag、MySQL QPS/慢 SQL。
 - SkyWalking 链路追踪定位慢接口。
 - 告警：DLT 有消息、lag 持续增长、Redis 与 DB 库存不一致（定时对账）。

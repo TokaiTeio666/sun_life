@@ -1,5 +1,6 @@
 package com.hmdp.mq;
 
+import com.hmdp.metrics.BizMetrics;
 import com.hmdp.service.IVoucherOrderService;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -26,6 +27,9 @@ public class OrderTimeoutScheduler {
     @Resource
     private RedissonClient redissonClient;
 
+    @Resource
+    private BizMetrics bizMetrics;
+
     @Scheduled(fixedDelayString = "${hmdp.order.timeout-scan-ms:60000}")
     public void closeTimeoutOrders() {
         RLock lock = redissonClient.getLock(JOB_LOCK_KEY);
@@ -35,6 +39,7 @@ public class OrderTimeoutScheduler {
         }
         try {
             int closed = voucherOrderService.closeTimeoutOrders();
+            bizMetrics.timeoutClosed(closed);
             if (closed > 0) {
                 log.info("超时关单完成，关闭 {} 笔未支付订单", closed);
             }

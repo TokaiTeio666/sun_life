@@ -30,12 +30,12 @@
         <stringProp name="ThreadGroup.num_threads">${__P(THREADS,200)}</stringProp>
         <stringProp name="ThreadGroup.ramp_time">1</stringProp>
         <boolProp name="ThreadGroup.scheduler">true</boolProp>
-        <stringProp name="ThreadGroup.duration">30</stringProp>
+        <stringProp name="ThreadGroup.duration">${__P(DURATION,30)}</stringProp>
         <stringProp name="ThreadGroup.delay"></stringProp>
       </ThreadGroup>
       <hashTree>
         <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="商铺详情" enabled="true">
-          <stringProp name="HTTPSampler.domain">127.0.0.1</stringProp>
+          <stringProp name="HTTPSampler.domain">${__P(SERVER_HOST,127.0.0.1)}</stringProp>
           <stringProp name="HTTPSampler.port">${__P(SERVER_PORT,8081)}</stringProp>
           <stringProp name="HTTPSampler.protocol">http</stringProp>
           <stringProp name="HTTPSampler.path">/shop/1</stringProp>

@@ -1,0 +1,176 @@
+# sun_life 第一版告警规则（阶段 3-1）
+# 分级：P0 电话 / P1 IM / P2 工单（severity 标签）。每条告警的 runbook 见 docs/monitoring.md「告警与处理」。
+# 阈值是第一版经验值，跑完容量基线（docs/capacity-baseline-report.md）后按实测拐点和 SLO 调整。
+
+groups:
+  # ---------------- 记录规则：看板和容量计算常用的聚合 ----------------
+  - name: hmdp-recording
+    rules:
+      - record: hmdp:http_requests:rate1m
+        expr: sum by (uri, method) (rate(http_server_requests_seconds_count{job="hmdp-app", uri!~"/actuator.*"}[1m]))
+      - record: hmdp:http_requests_per_instance:rate1m
+        expr: sum by (instance) (rate(http_server_requests_seconds_count{job="hmdp-app", uri!~"/actuator.*"}[1m]))
+      - record: hmdp:http_errors_ratio:rate5m
+        expr: |
+          sum(rate(http_server_requests_seconds_count{job="hmdp-app", status=~"5..", uri!~"/actuator.*"}[5m]))
+          /
+          clamp_min(sum(rate(http_server_requests_seconds_count{job="hmdp-app", uri!~"/actuator.*"}[5m])), 1e-9)
+      - record: hmdp:http_p99_seconds:rate5m
+        expr: histogram_quantile(0.99, sum by (le, uri) (rate(http_server_requests_seconds_bucket{job="hmdp-app", uri!~"/actuator.*"}[5m])))
+      - record: hmdp:seckill_lag:sum
+        expr: sum(kafka_consumergroup_lag{consumergroup="seckill-order-group", topic="seckill.orders"})
+
+  # ---------------- 应用 ----------------
+  - name: hmdp-app
+    rules:
+      - alert: AppInstanceDown
+        expr: up{job="hmdp-app"} == 0
+        for: 1m
+        labels: {severity: P0}
+        annotations:
+          summary: "app 实例 {{ $labels.instance }} 无法抓取"
+          description: "实例宕机或 9081 管理端口不可达，nginx 会自动摘除，但需确认剩余副本容量是否足够。"
+
+      - alert: HighErrorRate
+        expr: hmdp:http_errors_ratio:rate5m > 0.005
+        for: 5m
+        labels: {severity: P1}
+        annotations:
+          summary: "5xx 错误率 {{ $value | humanizePercentage }}（> 0.5%）"
+
+      - alert: HighP99Latency
+        expr: hmdp:http_p99_seconds:rate5m{uri=~"/shop/\\{id\\}|/voucher-order/seckill/\\{id\\}|/user/login"} > 0.1
+        for: 5m
+        labels: {severity: P1}
+        annotations:
+          summary: "核心接口 {{ $labels.uri }} P99 = {{ $value | humanizeDuration }}（SLO 100ms）"
+
+      - alert: HikariPoolPending
+        expr: max by (instance) (hikaricp_connections_pending{job="hmdp-app"}) > 0
+        for: 1m
+        labels: {severity: P1}
+        annotations:
+          summary: "{{ $labels.instance }} 有线程在等 DB 连接"
+          description: "连接池已打满：DB 变慢，或 DB_POOL_MAX 偏小。先看 MySQL 慢查询与行锁等待。"
+
+      - alert: TomcatThreadsSaturated
+        expr: |
+          max by (instance) (tomcat_threads_busy_threads{job="hmdp-app"})
+          / max by (instance) (tomcat_threads_config_max_threads{job="hmdp-app"}) > 0.8
+        for: 5m
+        labels: {severity: P2}
+        annotations:
+          summary: "{{ $labels.instance }} Tomcat 繁忙线程超过 80%"
+
+      - alert: JvmHeapHigh
+        expr: |
+          sum by (instance) (jvm_memory_used_bytes{job="hmdp-app", area="heap"})
+          / sum by (instance) (jvm_memory_max_bytes{job="hmdp-app", area="heap"}) > 0.85
+        for: 5m
+        labels: {severity: P2}
+        annotations:
+          summary: "{{ $labels.instance }} 堆使用率 {{ $value | humanizePercentage }}"
+
+  # ---------------- 秒杀链路（数据正确性） ----------------
+  - name: hmdp-seckill
+    rules:
+      - alert: SeckillOversellRisk
+        expr: min by (voucher) (hmdp_seckill_stock_gap) < 0
+        for: 1m
+        labels: {severity: P0}
+        annotations:
+          summary: "券 {{ $labels.voucher }} DB 库存低于 Redis 库存（差值 {{ $value }}），存在超卖风险"
+
+      - alert: SeckillStockGapNotConverging
+        # lag 已清零但 DB 仍比 Redis 多：有订单在 Lua 扣减后丢失（发送失败未回滚、进程崩溃）
+        expr: max by (voucher) (hmdp_seckill_stock_gap) > 0 and on() (hmdp:seckill_lag:sum == 0)
+        for: 5m
+        labels: {severity: P1}
+        annotations:
+          summary: "券 {{ $labels.voucher }} Kafka 无积压但库存差值为 {{ $value }}，需对账"
+
+      - alert: SeckillConsumerLagGrowing
+        expr: hmdp:seckill_lag:sum > 1000 and deriv(hmdp:seckill_lag:sum[2m]) > 0
+        for: 2m
+        labels: {severity: P1}
+        annotations:
+          summary: "秒杀消费 lag {{ $value }} 且仍在增长"
+          description: "消费端写库跟不上：看 MySQL 行锁等待、批量聚合度（hmdp_seckill_stock_update_orders）。"
+
+      - alert: SeckillDeadLetter
+        expr: sum(increase(kafka_topic_partition_current_offset{topic="seckill.orders.DLT"}[5m])) > 0
+        labels: {severity: P1}
+        annotations:
+          summary: "5 分钟内有 {{ $value }} 条秒杀订单进入死信"
+
+      - alert: SeckillSendRollbackFailed
+        expr: sum(increase(hmdp_seckill_send_failures_total{rollback="failed"}[5m])) > 0
+        labels: {severity: P0}
+        annotations:
+          summary: "订单消息发送失败且 Redis 库存回滚失败，需人工对账"
+
+      - alert: SeckillDbStockShort
+        expr: sum(increase(hmdp_seckill_db_stock_short_total[5m])) > 0
+        labels: {severity: P1}
+        annotations:
+          summary: "消费端出现 DB 库存不足，Redis 与 DB 库存不一致"
+
+  # ---------------- 存储与中间件 ----------------
+  - name: hmdp-storage
+    rules:
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 30s
+        labels: {severity: P0}
+        annotations: {summary: "Redis 不可用"}
+
+      - alert: RedisMemoryHigh
+        expr: redis_memory_max_bytes > 0 and redis_memory_used_bytes / redis_memory_max_bytes > 0.7
+        for: 5m
+        labels: {severity: P2}
+        annotations: {summary: "Redis 内存使用率 {{ $value | humanizePercentage }}"}
+
+      - alert: RedisCpuHigh
+        # Redis 命令执行单线程，单核 70% 即接近上限
+        expr: rate(redis_cpu_user_seconds_total[1m]) + rate(redis_cpu_sys_seconds_total[1m]) > 0.7
+        for: 5m
+        labels: {severity: P1}
+        annotations: {summary: "Redis 主线程 CPU {{ $value | humanizePercentage }}"}
+
+      - alert: RedisBigKey
+        expr: max by (key) (redis_key_size) > 1000000
+        for: 10m
+        labels: {severity: P2}
+        annotations: {summary: "大 key {{ $labels.key }} 元素数 {{ $value }}"}
+
+      - alert: MySQLDown
+        expr: mysql_up == 0
+        for: 30s
+        labels: {severity: P0}
+        annotations: {summary: "MySQL 不可用"}
+
+      - alert: MySQLConnectionsHigh
+        expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections > 0.8
+        for: 5m
+        labels: {severity: P1}
+        annotations:
+          summary: "MySQL 连接数达到 max_connections 的 {{ $value | humanizePercentage }}"
+          description: "副本数 × DB_POOL_MAX 接近上限，扩副本前先调整。"
+
+      - alert: MySQLSlowQueries
+        expr: rate(mysql_global_status_slow_queries[5m]) > 1
+        for: 5m
+        labels: {severity: P2}
+        annotations: {summary: "慢 SQL {{ $value }} 条/秒（long_query_time=200ms）"}
+
+      - alert: MySQLRowLockWaits
+        expr: rate(mysql_global_status_innodb_row_lock_waits[1m]) > 50
+        for: 5m
+        labels: {severity: P2}
+        annotations: {summary: "InnoDB 行锁等待 {{ $value }} 次/秒（热点库存行？）"}
+
+      - alert: KafkaExporterDown
+        expr: up{job="kafka"} == 0
+        for: 1m
+        labels: {severity: P2}
+        annotations: {summary: "kafka-exporter 不可用，lag / DLT 告警失效"}

@@ -263,6 +263,8 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 > 扩容到多副本：`docker compose -f deploy/docker-compose.yml up -d --scale app=3`，之后 `restart frontend` 让 nginx 重新解析副本。
 > 已有数据卷的环境需补索引：`docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/migration_v2.sql`。
 > 扩容路线与各阶段优化说明见 [docs/scaling-roadmap.md](docs/scaling-roadmap.md)。
+> 监控（Prometheus + Grafana + exporter，Grafana `localhost:3000`）：主编排后追加 `-f deploy/docker-compose.monitoring.yml`，
+> 说明见 [docs/monitoring.md](docs/monitoring.md)。
 >
 > **实测记录**（Docker Desktop 4.91 + WSL2 后端）：
 > 一键启动后 5 个服务全部健康；前端 `localhost:8080` 页面可访问，经 `/api` 代理登录 → 秒杀下单 → Kafka
@@ -319,6 +321,7 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 ```
 
 完整口径、重置脚本与实测数据见 [`perf/README.md`](perf/README.md)。
+容量基线（组件单测、单实例拐点、扩展效率、混合场景、容量模型）见 [`perf/baseline/README.md`](perf/baseline/README.md)。
 
 ---
 

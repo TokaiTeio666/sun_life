@@ -65,6 +65,8 @@
   - 验证码接口加按手机号/IP 的 Redis 限流（`sendCode`）。
 
 ## 阶段 3：架构演进（只写方案，不落地）
+> 完整技术方案（按生命周期分为评估规划 / 设计改造 / 验证上线 / 运行治理四个阶段）见 [phase3-architecture-plan.md](phase3-architecture-plan.md)。
+
 写入 `docs/scaling-roadmap.md`：
 - MySQL 主从读写分离（ShardingSphere-JDBC / 动态数据源），订单表按 user_id 分库分表 + 雪花/号段 ID 替代按天 INCR。
 - Redis Cluster（Lua 涉及的 key 加 hash tag `{voucherId}`）、Kafka 3 broker 副本因子 3。

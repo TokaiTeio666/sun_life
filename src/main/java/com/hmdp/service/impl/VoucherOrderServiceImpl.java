@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
+import com.hmdp.metrics.BizMetrics;
 import com.hmdp.mq.KafkaConstants;
 import com.hmdp.mq.SeckillOrderMessage;
 import com.hmdp.service.ISeckillVoucherService;
@@ -61,6 +62,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private TransactionTemplate transactionTemplate;
 
+    @Resource
+    private BizMetrics bizMetrics;
+
     /** 订单超时时长（分钟），超时扫描任务使用 */
     @Value("${hmdp.order.timeout-minutes:30}")
     private long timeoutMinutes;
@@ -95,6 +99,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 voucherId.toString(), userId.toString(), String.valueOf(orderId)
         );
         int r = result == null ? 1 : result.intValue();
+        bizMetrics.seckillRequest(r);
         if (r != 0) {
             return Result.fail(switch (r) {
                 case 2 -> "不能重复下单";
@@ -139,7 +144,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     Collections.emptyList(),
                     voucherId.toString(), userId.toString()
             );
+            bizMetrics.sendFailure(true);
         } catch (Exception rollbackEx) {
+            bizMetrics.sendFailure(false);
             // 回滚失败只能告警，需人工对账
             log.error("库存回滚失败，需人工核对 voucherId={} userId={} orderId={}",
                     voucherId, userId, orderId, rollbackEx);
@@ -167,6 +174,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .update();
         if (!success) {
             log.error("DB 库存不足，跳过下单 voucherId={} orderId={}", voucherOrder.getVoucherId(), voucherOrder.getId());
+            bizMetrics.dbStockShort();
             return false;
         }
         //2. 创建订单（主键冲突即重复消费，异常抛出后整体回滚）

@@ -50,3 +50,9 @@ perf/report-*/
 
 deploy/cpolar.log
 deploy/cpolar.err.log
+
+# 容量基线：JMeter 原始数据与 HTML 报告不入库，summary.md / results.json / component.md 入库
+perf/baseline/results/**/run.jtl
+perf/baseline/results/**/report/
+perf/baseline/results/**/jmeter.log
+perf/baseline/capacity-model.json

@@ -7,6 +7,9 @@ server:
       min-spare: 20
     accept-count: 500
     max-connections: 8192
+    # 暴露 tomcat.threads.busy 等 MBean 指标（容量评估需要看繁忙线程数）
+    mbeanregistry:
+      enabled: true
 spring:
   application:
     name: hmdp
@@ -83,6 +86,31 @@ hmdp:
     # 未支付订单超时时长与扫描间隔（Kafka 无延迟消息，改用本地定时任务）
     timeout-minutes: 30
     timeout-scan-ms: 60000
+  metrics:
+    # 秒杀库存对账（Redis 与 DB 库存差值）采样间隔
+    stock-gap-scan-ms: 15000
+# ========== 监控（阶段 3-1） ==========
+# 管理端口与业务端口分离：网关只代理 8081，/actuator 不会对外暴露；Prometheus 在容器网络内抓取 9081
+management:
+  server:
+    port: ${MANAGEMENT_PORT:9081}
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # 输出直方图桶，Prometheus 端可跨实例聚合出 P95 / P99（客户端计算的分位数无法聚合）
+      percentiles-histogram:
+        http.server.requests: true
+      maximum-expected-value:
+        http.server.requests: 5s
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:
