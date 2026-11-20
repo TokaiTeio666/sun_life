@@ -128,6 +128,8 @@ services:
       LOCAL_CACHE_ENABLED: "${LOCAL_CACHE_ENABLED:-true}"
       # 秒杀售罄本地标记；false = 售罄后每个请求仍执行 Lua
       SECKILL_SOLDOUT_FLAG: "${SECKILL_SOLDOUT_FLAG:-true}"
+      # 订单号生成：local = 本地发号；redis = 每个订单号一次 Redis INCR
+      ORDER_ID_MODE: "${ORDER_ID_MODE:-local}"
       # 默认是 4G 内存机器的保守值；压测 / 生产用 APP_JAVA_OPTS 调大堆
       JAVA_OPTS: "${APP_JAVA_OPTS:--Xms256m -Xmx512m -Dfile.encoding=UTF-8}"
       TZ: Asia/Shanghai

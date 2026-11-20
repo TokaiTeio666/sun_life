@@ -14,6 +14,11 @@ server:
 spring:
   application:
     name: hmdp
+  task:
+    scheduling:
+      # 定时任务默认只有 1 个线程：超时关单、布隆同步跑得久时会挡住订单号机器号的续约（20s 一次）
+      pool:
+        size: 4
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     # rewriteBatchedStatements：saveBatch 真正合并成多值 INSERT（秒杀批量落库依赖）
@@ -102,6 +107,10 @@ hmdp:
     fpp: 0.01
     # 增量同步间隔：补上不经过本副本写入的新商铺，并检查位图是否丢失
     sync-interval-ms: 60000
+  # 订单号生成方式（见 RedisIdWorker）：local = 本地发号（启动时在 Redis 抢占机器号并续约，发号不访问 Redis）；
+  # redis = 改造前的方式，每个订单号一次 INCR。两种 id 不会重复，可以随时切换
+  id:
+    mode: ${ORDER_ID_MODE:local}
   # 秒杀售罄本地标记（见 SeckillSoldOutFlags）：Lua 返回库存不足后在副本内记几秒，期间该券的请求直接返回，不访问 Redis。
   # 库存回补（超时关单、发送失败回滚）时广播清除；ttl 是广播丢失或直接改 Redis 库存时的兜底
   seckill:
