@@ -119,6 +119,9 @@ services:
       # 过载保护：等 DB 连接的超时（毫秒）；回源 DB 并发闸许可数（-1 = 连接池 × 2，0 = 关闭）
       DB_CONN_TIMEOUT_MS: "${DB_CONN_TIMEOUT_MS:-800}"
       DB_GATE_PERMITS: "${DB_GATE_PERMITS:--1}"
+      # 关注 Feed：false 回到发帖时同步推送；粉丝数超过阈值的作者不推送、改为读取时拉取
+      FEED_ASYNC_PUSH: "${FEED_ASYNC_PUSH:-true}"
+      FEED_BIGV_THRESHOLD: "${FEED_BIGV_THRESHOLD:-5000}"
       # 默认是 4G 内存机器的保守值；压测 / 生产用 APP_JAVA_OPTS 调大堆
       JAVA_OPTS: "${APP_JAVA_OPTS:--Xms256m -Xmx512m -Dfile.encoding=UTF-8}"
       TZ: Asia/Shanghai

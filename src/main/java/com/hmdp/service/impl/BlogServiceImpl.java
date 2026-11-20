@@ -9,12 +9,11 @@ import com.hmdp.dto.Result;
 import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
-import com.hmdp.entity.Follow;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.hmdp.service.IFollowService;
+import com.hmdp.service.FeedService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
@@ -22,14 +21,12 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.connection.StringRedisConnection;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -44,14 +41,12 @@ import static com.hmdp.utils.RedisConstants.BLOG_LIKED_TOP_LIMIT;
 import static com.hmdp.utils.RedisConstants.BLOG_UV_KEY;
 import static com.hmdp.utils.RedisConstants.CACHE_HOT_BLOG_KEY;
 import static com.hmdp.utils.RedisConstants.CACHE_HOT_BLOG_TTL_SECONDS;
-import static com.hmdp.utils.RedisConstants.FEED_KEY;
-import static com.hmdp.utils.RedisConstants.FEED_MAX_SIZE;
 
 /**
  * 探店笔记服务。
  *
  * <p>性能要点：列表类接口批量查询作者（1 次 IN 查询）+ pipeline 批量判断点赞（1 次往返），
- * 消除逐条 N+1；热门列表短 TTL 缓存；点赞切换用 Lua 原子完成；Feed 推送 pipeline 并截断收件箱。</p>
+ * 消除逐条 N+1；热门列表短 TTL 缓存；点赞切换用 Lua 原子完成；Feed 的分发与读取在 FeedService。</p>
  */
 @Slf4j
 @Service
@@ -80,7 +75,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     private StringRedisTemplate stringRedisTemplate;
 
     @Resource
-    private IFollowService followService;
+    private FeedService feedService;
 
     @Resource
     private ObjectMapper objectMapper;
@@ -176,26 +171,14 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         if(!isSuccess){
             return Result.fail("新增笔记失败!");
         }
-        // 3.查询笔记作者的所有粉丝（只取 user_id，走 idx_follow_user 索引）
-        List<Follow> follows = followService.query()
-                .select("user_id")
-                .eq("follow_user_id", user.getId())
-                .list();
-        // 4.pipeline 一次往返推送给所有粉丝，并把每个收件箱截断到最近 FEED_MAX_SIZE 条
-        if (!follows.isEmpty()) {
-            String blogId = blog.getId().toString();
-            double score = System.currentTimeMillis();
-            stringRedisTemplate.executePipelined((RedisCallback<Object>) connection -> {
-                StringRedisConnection conn = (StringRedisConnection) connection;
-                for (Follow follow : follows) {
-                    String key = FEED_KEY + follow.getUserId();
-                    conn.zAdd(key, score, blogId);
-                    conn.zRemRange(key, 0, -(FEED_MAX_SIZE + 1));
-                }
-                return null;
-            });
+        // 3.分发到粉丝的 Feed：只写发件箱 + 发一条消息，由消费者异步推送（见 FeedService），耗时与粉丝数无关。
+        //   笔记已经落库，分发出错不影响发布结果
+        try {
+            feedService.publish(blog.getId(), user.getId());
+        } catch (Exception e) {
+            log.error("笔记 Feed 分发失败 blogId={} userId={}", blog.getId(), user.getId(), e);
         }
-        // 5.返回id
+        // 4.返回id
         return Result.ok(blog.getId());
     }
 
@@ -203,40 +186,25 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     public Result queryBlogOfFollow(Long max, Integer offset) {
         // 1.获取当前用户
         Long userId = UserHolder.getUser().getId();
-        // 2.查询收件箱 ZREVRANGEBYSCORE key Max Min LIMIT offset count
-        String key = FEED_KEY + userId;
-        Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
-                .reverseRangeByScoreWithScores(key, 0, max, offset, SystemConstants.DEFAULT_PAGE_SIZE);
+        // 2.滚动读取一页：收件箱 + 所关注大 V 的发件箱，合并去重（见 FeedService）
+        FeedService.FeedPage page = feedService.read(userId, max, offset == null ? 0 : offset,
+                SystemConstants.DEFAULT_PAGE_SIZE);
         // 3.非空判断
-        if (typedTuples == null || typedTuples.isEmpty()) {
+        if (page == null) {
             return Result.ok();
         }
-        // 4.解析数据：blogId、minTime（时间戳）、offset
-        List<Long> ids = new ArrayList<>(typedTuples.size());
-        long minTime = 0;
-        int os = 1;
-        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) {
-            ids.add(Long.valueOf(tuple.getValue()));
-            long time = tuple.getScore().longValue();
-            if(time == minTime){
-                os++;
-            }else{
-                minTime = time;
-                os = 1;
-            }
-        }
-        os = minTime == max ? os : os + offset;
-        // 5.根据id查询blog，批量补充作者与点赞状态
+        List<Long> ids = page.blogIds();
+        // 4.根据id查询blog，批量补充作者与点赞状态
         String idStr = StrUtil.join(",", ids);
         List<Blog> blogs = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
         fillBlogUsers(blogs);
         fillBlogLiked(blogs);
 
-        // 6.封装并返回
+        // 5.封装并返回
         ScrollResult r = new ScrollResult();
         r.setList(blogs);
-        r.setOffset(os);
-        r.setMinTime(minTime);
+        r.setOffset(page.offset());
+        r.setMinTime(page.minTime());
 
         return Result.ok(r);
     }

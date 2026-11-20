@@ -67,6 +67,9 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | `hmdp_seckill_stock{voucher,source}` | gauge | 每 15s 采样的 Redis / DB 库存 |
 | `hmdp_seckill_stock_gap{voucher}` | gauge | **DB 库存 − Redis 库存**。Redis 先扣、DB 后扣，正常 ≥ 0 且等于在途订单数，lag 清零后归零 |
 | `hmdp_overload_rejected_total{reason}` | counter | 过载保护返回 503 的请求数：`db_gate` 并发闸拒绝、`db_conn_timeout` 等 DB 连接超时 |
+| `hmdp_feed_fanout_total{mode}` | counter | 笔记 Feed 分发次数：`push` 推送到粉丝收件箱、`pull` 大 V 不推送 |
+| `hmdp_feed_pushed_entries_total` | counter | 推送写入收件箱的条数（被推送的粉丝数之和） |
+| `hmdp_feed_publish_failures_total` / `hmdp_feed_fanout_failures_total` | counter | 发布消息投递 Kafka 失败 / 分发重试耗尽被跳过；非 0 表示有粉丝少收到笔记 |
 | `hmdp_db_gate_active` / `hmdp_db_gate_permits` | gauge | 并发闸内正在回源 DB 的请求数 / 许可数（0 = 闸已关闭） |
 
 > 命名约定：不要以 `created` 结尾（OpenMetrics 保留后缀，会被丢弃）；DistributionSummary 不设 `baseUnit`（会被拼进指标名）。

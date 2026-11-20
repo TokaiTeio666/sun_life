@@ -39,6 +39,12 @@ public class RedisConstants {
     public static final Long CACHE_HOT_BLOG_TTL_SECONDS = 60L;
     /** 粉丝收件箱最多保留条数 */
     public static final int FEED_MAX_SIZE = 1000;
+    /** 作者发件箱（zset，member = 笔记 id，score = 发布时间毫秒）：大 V 的笔记不推送，粉丝读 Feed 时从这里拉取 */
+    public static final String FEED_OUTBOX_KEY = "outbox:";
+    /** 发件箱最多保留条数 */
+    public static final int FEED_OUTBOX_MAX_SIZE = 1000;
+    /** 大 V 集合（set，member = 用户 id）：粉丝数超过阈值的作者，发笔记时不再逐个推送 */
+    public static final String FEED_BIGV_KEY = "feed:bigv";
     /** 秒杀订单状态短缓存，供前端轮询 */
     public static final String ORDER_STATUS_KEY = "order:status:";
     public static final Long ORDER_STATUS_TTL_MINUTES = 5L;

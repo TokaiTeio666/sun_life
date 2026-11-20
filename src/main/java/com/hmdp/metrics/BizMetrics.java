@@ -68,6 +68,11 @@ public class BizMetrics {
     private final Counter dbStockShort;
     private final Counter deadLetters;
     private final Counter timeoutClosed;
+    private final Counter feedFanoutPush;
+    private final Counter feedFanoutPull;
+    private final Counter feedPushedEntries;
+    private final Counter feedPublishFailures;
+    private final Counter feedFanoutFailures;
     private final DistributionSummary consumeBatchSize;
     private final DistributionSummary ordersPerStockUpdate;
 
@@ -104,6 +109,17 @@ public class BizMetrics {
                 .description("进入死信主题的秒杀订单消息数").register(registry);
         timeoutClosed = Counter.builder("hmdp.order.timeout.closed")
                 .description("超时未支付被关闭的订单数").register(registry);
+        feedFanoutPush = Counter.builder("hmdp.feed.fanout")
+                .description("笔记 Feed 分发次数（mode=push 推送到粉丝收件箱；pull 大 V 不推送，由粉丝读取时拉取）")
+                .tag("mode", "push").register(registry);
+        feedFanoutPull = Counter.builder("hmdp.feed.fanout")
+                .tag("mode", "pull").register(registry);
+        feedPushedEntries = Counter.builder("hmdp.feed.pushed.entries")
+                .description("推送写入粉丝收件箱的条数（= 被推送的粉丝数之和）").register(registry);
+        feedPublishFailures = Counter.builder("hmdp.feed.publish.failures")
+                .description("笔记发布消息投递 Kafka 失败次数（笔记已落库，但不会推送给粉丝）").register(registry);
+        feedFanoutFailures = Counter.builder("hmdp.feed.fanout.failures")
+                .description("Feed 分发重试耗尽后被跳过的消息数").register(registry);
         consumeBatchSize = DistributionSummary.builder("hmdp.seckill.consume.batch.size")
                 .description("每次 poll 交给批量监听器的消息条数")
                 .serviceLevelObjectives(1, 5, 10, 25, 50, 100, 200)
@@ -116,6 +132,21 @@ public class BizMetrics {
 
     public void overloadRejected(OverloadReason reason) {
         overloadRejected.get(reason).increment();
+    }
+
+    public void feedFanout(boolean pull, long pushedEntries) {
+        (pull ? feedFanoutPull : feedFanoutPush).increment();
+        if (pushedEntries > 0) {
+            feedPushedEntries.increment(pushedEntries);
+        }
+    }
+
+    public void feedPublishFailure() {
+        feedPublishFailures.increment();
+    }
+
+    public void feedFanoutFailed() {
+        feedFanoutFailures.increment();
     }
 
     public void seckillRequest(int luaCode) {
