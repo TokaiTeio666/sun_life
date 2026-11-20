@@ -12,12 +12,35 @@
 
 ## 环境要求
 
-- **压测机与被测服务分开部署**。同机时压测机抢 CPU，副本越多越被低估；
+- **压测机与被测服务分开部署**。同机时压测机抢 CPU，副本越多越被低估；分机部署步骤见 [../../docs/bench-deploy.md](../../docs/bench-deploy.md)；
 - 被测环境带监控启动：`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml up -d --build`；
 - 不要叠加 `docker-compose.tracing.yml`（agent 有开销）；
 - 每轮压测时 Grafana 时间范围对准压测窗口，截图「容量」「JVM 与连接池」「Redis」「MySQL」「Kafka」几组面板存档。
 
 工具：`component-bench.sh` 需要 bash + docker；`baseline.py`、`capacity_model.py` 只用 Python 3.8+ 标准库；JMeter 5.5+。
+
+## 第 0 步：造数
+
+课程自带的 `hmdp.sql` 只有 14 家店、一千个用户，所有数据都在内存里，测出的读性能和秒杀落库性能都偏乐观。
+正式基线要先把数据量灌到目标规模（默认 100 万用户 / 10 万店铺 / 1000 万订单，约 3–4 GB）：
+
+```bash
+python perf/baseline/seed_data.py --buffer-pool-gb 4          # 默认规模；缓冲池按机器内存的 50–70% 给
+python perf/baseline/seed_data.py --users 100000 --shops 10000 --orders 1000000   # 1/10 规模试跑
+```
+
+- 数据由 MySQL 服务端 `INSERT ... SELECT` 生成，客户端是一次性容器，连接参数与 `component-bench.sh` 通用（`NET`、`MYSQL_HOST` 等）；
+- 可重复执行、可中断续跑（进度记在 `seed_progress` 表），调大目标后重跑只补差额，不会删数据；
+- 同时生成笔记、关注关系（含粉丝数万的大 V）、优惠券，以及 Redis 里的店铺坐标和关注收件箱，混合场景的每个接口都有数据可读；
+- 订单没有「未支付」状态、秒杀券活动都已结束，不会触发超时关单，也不会拖慢应用启动；
+- 灌数默认不写 binlog（有从库或托管数据库不允许时加 `--keep-binlog`）。
+
+灌完后**重启 app**（布隆过滤器启动时预热）、重新生成 token，压测时加 `--prop SHOP_MAX=100000`。
+MySQL 默认的 `innodb_buffer_pool_size` 只有 128M，放不下这些数据；`--buffer-pool-gb` 的修改重启后失效，
+正式压测要把它写进 MySQL 启动参数，否则测的是磁盘而不是数据库。
+
+> `RedisBloomFilter` 的容量按 1 万家店铺设计（`EXPECTED_INSERTIONS = 10_000`），10 万家店铺时位图几乎写满，
+> 对不存在的 id 基本不再拦截。不影响压测存在的店铺，但上线到这个规模前要调大容量。
 
 ## 第 1 步：组件单测
 
@@ -38,10 +61,11 @@ SYSBENCH=1 bash perf/baseline/component-bench.sh mysql   # 额外跑 sysbench ol
 
 ```bash
 NET=host REDIS_HOST=10.0.0.5 REDIS_PORT=6380 MYSQL_HOST=10.0.0.5 MYSQL_PORT=3307 \
-KAFKA_BOOTSTRAP=10.0.0.5:9092 bash perf/baseline/component-bench.sh
+KAFKA_BOOTSTRAP=10.0.0.5:9094 bash perf/baseline/component-bench.sh
 ```
 
-> Kafka 的 advertised listener 是 `kafka:9092`，跨机测 Kafka 需要先把它改成外部可达地址。
+> 跨机测 Kafka 用它的对外监听器 `<中间件机 IP>:9094`（由 `KAFKA_EXTERNAL_HOST` 指定对外地址），不要用 9092。
+> 分机部署的完整步骤见 [../../docs/bench-deploy.md](../../docs/bench-deploy.md)。
 
 可调参数：`REDIS_N`、`REDIS_CLIENTS`、`MYSQL_CONCURRENCY`、`MYSQL_TIME`、`KAFKA_RECORDS`、`KAFKA_RECORD_SIZE`。
 

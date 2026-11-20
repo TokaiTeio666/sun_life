@@ -23,6 +23,10 @@ services:
       - --slow-query-log=ON
       - --slow-query-log-file=/var/lib/mysql/slow.log
       - --long-query-time=0.2
+      # 容量参数：默认值就是 MySQL 自身的默认值；压测 / 生产按机器规格调大（见 deploy/bench.env.example）
+      - --max-connections=${MYSQL_MAX_CONNECTIONS:-151}
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL:-128M}
+      - --innodb-redo-log-capacity=${MYSQL_REDO_LOG:-100M}
     ports:
       - "${MYSQL_PORT:-3307}:3306"
     volumes:
@@ -57,13 +61,18 @@ services:
     container_name: hmdp-kafka
     ports:
       - "${KAFKA_PORT:-9092}:9092"
+      - "${KAFKA_EXTERNAL_PORT:-9094}:9094"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      # 两个监听器：PLAINTEXT 给 compose 网络内的客户端（地址 kafka:9092）；
+      # EXTERNAL 给网络外的客户端（宿主机上的进程、分机部署时其他机器上的 app），
+      # 对外地址由 KAFKA_EXTERNAL_HOST 指定，必须是客户端能访问到的 IP / 域名
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://${KAFKA_EXTERNAL_HOST:-localhost}:${KAFKA_EXTERNAL_PORT:-9094}
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -91,21 +100,22 @@ services:
       # 管理端口（/actuator/prometheus）：只在容器网络内供 Prometheus 抓取，网关不代理
       - "9081"
     environment:
-      # 覆盖 application.yaml 中 127.0.0.1 的配置，改为容器服务名
-      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/hmdp?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&characterEncoding=utf8&rewriteBatchedStatements=true"
+      # 覆盖 application.yaml 中 127.0.0.1 的配置，默认连同一编排里的容器；
+      # 分机部署时用 APP_MYSQL_ADDR / APP_REDIS_HOST / APP_REDIS_PORT / APP_KAFKA_BOOTSTRAP 指向其他机器
+      SPRING_DATASOURCE_URL: "jdbc:mysql://${APP_MYSQL_ADDR:-mysql:3306}/hmdp?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&characterEncoding=utf8&rewriteBatchedStatements=true"
       SPRING_DATASOURCE_USERNAME: "root"
       SPRING_DATASOURCE_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
-      SPRING_DATA_REDIS_HOST: "redis"
-      SPRING_DATA_REDIS_PORT: "6379"
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      SPRING_DATA_REDIS_HOST: "${APP_REDIS_HOST:-redis}"
+      SPRING_DATA_REDIS_PORT: "${APP_REDIS_PORT:-6379}"
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: "${APP_KAFKA_BOOTSTRAP:-kafka:9092}"
       # 压测开关：false 时商铺详情直查 MySQL（用于缓存 A/B 对比）
       HMDP_CACHE_ENABLED: "${HMDP_CACHE_ENABLED:-true}"
       # 图片写共享卷，任意副本上传、nginx 直接对外提供
       HMDP_UPLOAD_DIR: "/data/upload"
       # 每个副本的 DB 连接池上限；副本数 × 该值需小于 MySQL max_connections
       DB_POOL_MAX: "${DB_POOL_MAX:-30}"
-      # 云服务器低内存场景限制堆大小（4G 内存机器推荐值）
-      JAVA_OPTS: "-Xms256m -Xmx512m -Dfile.encoding=UTF-8"
+      # 默认是 4G 内存机器的保守值；压测 / 生产用 APP_JAVA_OPTS 调大堆
+      JAVA_OPTS: "${APP_JAVA_OPTS:--Xms256m -Xmx512m -Dfile.encoding=UTF-8}"
       TZ: Asia/Shanghai
     volumes:
       - upload-data:/data/upload/blogs

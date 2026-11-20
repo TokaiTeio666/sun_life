@@ -9,7 +9,7 @@
 # 压测客户端以一次性容器运行（docker run --rm），通过 compose 网络访问被测组件。
 # 被测组件在另一台机器时，改用 --network host 并把 *_HOST 指向那台机器：
 #   NET=host REDIS_HOST=10.0.0.5 REDIS_PORT=6380 MYSQL_HOST=10.0.0.5 MYSQL_PORT=3307 \
-#   KAFKA_BOOTSTRAP=10.0.0.5:9092 bash perf/baseline/component-bench.sh
+#   KAFKA_BOOTSTRAP=10.0.0.5:9094 bash perf/baseline/component-bench.sh
 # 注意：客户端与被测组件同机时会抢 CPU，结果偏低，只能作为下限参考。
 #
 # 所有测试数据都写在独立的 key / 表 / topic 里，结束后清理，不影响业务数据：
