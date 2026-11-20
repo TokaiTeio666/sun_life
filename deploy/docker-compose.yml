@@ -124,6 +124,8 @@ services:
       FEED_BIGV_THRESHOLD: "${FEED_BIGV_THRESHOLD:-5000}"
       # 登录态本地短缓存秒数；0 = 关闭（每个带 token 的请求一次 HGETALL）
       LOGIN_LOCAL_CACHE_SECONDS: "${LOGIN_LOCAL_CACHE_SECONDS:-15}"
+      # 多级缓存的本地一级（店铺详情 / 商铺类型 / 热门笔记）；false = 只用 Redis
+      LOCAL_CACHE_ENABLED: "${LOCAL_CACHE_ENABLED:-true}"
       # 默认是 4G 内存机器的保守值；压测 / 生产用 APP_JAVA_OPTS 调大堆
       JAVA_OPTS: "${APP_JAVA_OPTS:--Xms256m -Xmx512m -Dfile.encoding=UTF-8}"
       TZ: Asia/Shanghai

@@ -15,6 +15,7 @@ import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.service.FeedService;
 import com.hmdp.service.IUserService;
+import com.hmdp.utils.LocalCache;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
@@ -78,6 +79,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     private FeedService feedService;
 
     @Resource
+    private LocalCache localCache;
+
+    @Resource
     private ObjectMapper objectMapper;
 
     @Override
@@ -103,7 +107,9 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     public Result queryHotBlog(Integer current) {
         int page = current == null || current < 1 ? 1 : current;
         String key = CACHE_HOT_BLOG_KEY + page;
-        List<Blog> records = readBlogCache(key);
+        // 第一级：本地短缓存；第二级：Redis（60s）；都没有才查库
+        List<Blog> shared = localCache.get(key);
+        List<Blog> records = shared != null ? shared : readBlogCache(key);
         if (records == null) {
             int offset = (page - 1) * SystemConstants.MAX_PAGE_SIZE;
             records = query()
@@ -113,6 +119,11 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             fillBlogUsers(records);
             writeBlogCache(key, records);
         }
+        if (shared == null) {
+            localCache.put(key, records);
+        }
+        // 本地缓存里的对象在请求之间共享，而 isLike 因人而异：复制一份再填，不能改缓存里的对象
+        records = records.stream().map(b -> BeanUtil.copyProperties(b, Blog.class)).collect(Collectors.toList());
         fillBlogLiked(records);
         return Result.ok(records);
     }

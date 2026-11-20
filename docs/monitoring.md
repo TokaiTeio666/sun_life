@@ -70,7 +70,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | `hmdp_feed_fanout_total{mode}` | counter | 笔记 Feed 分发次数：`push` 推送到粉丝收件箱、`pull` 大 V 不推送 |
 | `hmdp_feed_pushed_entries_total` | counter | 推送写入收件箱的条数（被推送的粉丝数之和） |
 | `hmdp_feed_publish_failures_total` / `hmdp_feed_fanout_failures_total` | counter | 发布消息投递 Kafka 失败 / 分发重试耗尽被跳过；非 0 表示有粉丝少收到笔记 |
-| `cache_gets_total{cache,result}` / `cache_size{cache}` | counter / gauge | 本地缓存（Caffeine）命中 / 未命中次数与条数；`cache="loginUser"` 是登录态短缓存，未命中数 ≈ `HGETALL` 次数 |
+| `cache_gets_total{cache,result}` / `cache_size{cache}` | counter / gauge | 本地缓存（Caffeine）命中 / 未命中次数与条数；`cache="loginUser"` 是登录态短缓存，未命中数 ≈ `HGETALL` 次数；`cache="l1"` 是多级缓存的本地一级（店铺详情 / 商铺类型 / 热门笔记） |
 | `hmdp_db_gate_active` / `hmdp_db_gate_permits` | gauge | 并发闸内正在回源 DB 的请求数 / 许可数（0 = 闸已关闭） |
 
 > 命名约定：不要以 `created` 结尾（OpenMetrics 保留后缀，会被丢弃）；DistributionSummary 不设 `baseUnit`（会被拼进指标名）。

@@ -88,6 +88,13 @@ hmdp:
   # 压测开关：false 时商铺详情跳过布隆过滤器与缓存，直接查库（用于 A/B 对比）
   cache:
     enabled: true
+    # 多级缓存的第一级：副本内的 Caffeine 短缓存（店铺详情、商铺类型、热门笔记），命中时不访问 Redis。
+    # 更新店铺时广播删除；广播丢失时其他副本最多读到 ttl-seconds 的旧值。关闭：LOCAL_CACHE_ENABLED=false
+    local:
+      enabled: ${LOCAL_CACHE_ENABLED:true}
+      ttl-seconds: 10
+      # 条数上限（一个店铺对象约 2–3KB，1 万条约 30MB；按堆大小调整）
+      max-size: 10000
   # 商铺布隆过滤器。位图大小约 expected-insertions × 9.6 位（100 万 ≈ 1.2MB）；实际商铺数超过设计容量后误判率快速上升。
   # 改这两个值会换一个新的位图 key（bloom:shop:{位数}:{哈希数}）并在启动时重新预热，旧 key 1 天后过期
   bloom:

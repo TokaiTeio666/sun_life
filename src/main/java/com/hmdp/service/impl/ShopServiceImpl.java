@@ -12,6 +12,7 @@ import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.DbGate;
+import com.hmdp.utils.LocalCache;
 import com.hmdp.utils.RedisBloomFilter;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisData;
@@ -60,6 +61,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     private DbGate dbGate;
 
+    @Resource
+    private LocalCache localCache;
+
     /** 压测开关：false 时跳过布隆过滤器与缓存，直接查库，用于对比缓存前后 P99 */
     @Value("${hmdp.cache.enabled:true}")
     private boolean cacheEnabled;
@@ -70,6 +74,13 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             // 直查 DB 同样经过并发闸：关缓存压测时这里就是全部的回源流量
             Shop fromDb = dbGate.call(() -> getById(id));
             return fromDb == null ? Result.fail("店铺不存在！") : Result.ok(fromDb);
+        }
+
+        // 第一级：本地短缓存。命中时不访问 Redis（只缓存存在的店铺；不存在的 id 由布隆过滤器拦，不占本地缓存）
+        String localKey = CACHE_SHOP_KEY + id;
+        Shop local = localCache.get(localKey);
+        if (local != null) {
+            return Result.ok(local);
         }
 
         // 布隆过滤器前置拦截：不存在的 id 不查 Redis、不打 MySQL
@@ -95,6 +106,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         if (shop==null) {
             return Result.fail("店铺不存在！");
         }
+        localCache.put(localKey, shop);
         //7. 返回
         return Result.ok(shop);
     }
@@ -117,7 +129,11 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         //1. 更新数据库
         updateById(shop);
         //2. 删除缓存
-        stringRedisTemplate.delete(CACHE_SHOP_KEY + shop.getId());
+        String key = CACHE_SHOP_KEY + shop.getId();
+        stringRedisTemplate.delete(key);
+        //3. 事务提交后再删一次 Redis，并删各副本的本地缓存：提交前删的那一次之后，
+        //   并发读请求可能已经把旧值重新写回缓存
+        localCache.evictAfterCommit(key, () -> stringRedisTemplate.delete(key));
         return Result.ok(shop);
     }
 
