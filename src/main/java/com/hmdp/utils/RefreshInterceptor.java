@@ -17,14 +17,20 @@ import java.util.concurrent.TimeUnit;
  *
  * <p>只负责“识别身份”，不负责“拦截”：token 缺失或过期一律放行，由 {@link LoginInterceptor}
  * 对需要登录的路径返回 401，避免过期 token 把公开页面也挡住。</p>
+ *
+ * <p>先查本地短缓存（{@link LoginUserCache}），未命中才 {@code HGETALL}。续期判断只在未命中、刚读过 Redis 时做：
+ * 本地缓存的 TTL（十几秒）远小于续期间隔（30 分钟），不会漏掉续期；而且这样续期写入之前一定刚确认过 key 还在，
+ * 不会给已经退出登录的 token 重新写出一个只有 refreshAt 字段的 key。</p>
  */
 @Component
 public class RefreshInterceptor implements HandlerInterceptor {
 
     private final StringRedisTemplate stringRedisTemplate;
+    private final LoginUserCache loginUserCache;
 
-    public RefreshInterceptor(StringRedisTemplate stringRedisTemplate) {
+    public RefreshInterceptor(StringRedisTemplate stringRedisTemplate, LoginUserCache loginUserCache) {
         this.stringRedisTemplate = stringRedisTemplate;
+        this.loginUserCache = loginUserCache;
     }
 
     @Override
@@ -35,20 +41,31 @@ public class RefreshInterceptor implements HandlerInterceptor {
             return true;
         }
 
-        //2. 查询 Redis 中的用户
+        //2. 本地短缓存命中：不访问 Redis
+        UserDTO cached = loginUserCache.get(token);
+        if (cached != null) {
+            UserHolder.saveUser(cached);
+            return true;
+        }
+
+        //3. 查询 Redis 中的用户
         String key = RedisConstants.LOGIN_USER_KEY + token;
         Map<Object, Object> userMap = stringRedisTemplate.opsForHash().entries(key);
 
-        //3. token 已过期：按未登录处理，交给 LoginInterceptor 决定是否拦截
+        //4. token 已过期：按未登录处理，交给 LoginInterceptor 决定是否拦截
         if (userMap.isEmpty()) {
             return true;
         }
 
-        //4. 保存用户到 ThreadLocal（refreshAt 等多余字段会被忽略）
+        //5. 保存用户到 ThreadLocal（refreshAt 等多余字段会被忽略）。没有 id 的不是有效登录态，按未登录处理
         UserDTO userDTO = BeanUtil.fillBeanWithMap(userMap, new UserDTO(), false);
+        if (userDTO.getId() == null) {
+            return true;
+        }
         UserHolder.saveUser(userDTO);
+        loginUserCache.put(token, userDTO);
 
-        //5. 按需续期：距上次续期超过阈值才写 Redis，避免每个请求多一次 EXPIRE
+        //6. 按需续期：距上次续期超过阈值才写 Redis，避免每个请求多一次 EXPIRE
         long now = System.currentTimeMillis();
         Object refreshAt = userMap.get(RedisConstants.LOGIN_REFRESH_AT_FIELD);
         long last = refreshAt == null ? 0L : Long.parseLong(refreshAt.toString());

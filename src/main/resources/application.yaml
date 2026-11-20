@@ -95,6 +95,11 @@ hmdp:
     fpp: 0.01
     # 增量同步间隔：补上不经过本副本写入的新商铺，并检查位图是否丢失
     sync-interval-ms: 60000
+  # 登录态本地短缓存（见 LoginUserCache）：token → 用户在副本内缓存若干秒，省掉每个请求一次 HGETALL。
+  # 退出登录 / token 过期在其他副本上最多延迟这么久生效；0 = 关闭
+  login:
+    local-cache-seconds: ${LOGIN_LOCAL_CACHE_SECONDS:15}
+    local-cache-max-size: 200000
   # 关注 Feed 的分发（见 FeedService）
   feed:
     # true：发帖只写发件箱并发一条 Kafka 消息，由消费者分批推送；false：回到在请求线程里同步推送给全部粉丝

@@ -11,6 +11,7 @@ import com.hmdp.entity.User;
 import com.hmdp.entity.UserInfo;
 import com.hmdp.service.IUserInfoService;
 import com.hmdp.service.IUserService;
+import com.hmdp.utils.LoginUserCache;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RegexUtils;
 import com.hmdp.utils.UserHolder;
@@ -45,6 +46,9 @@ public class UserController {
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private LoginUserCache loginUserCache;
 
     /**
      * 发送手机验证码
@@ -92,8 +96,10 @@ public class UserController {
         if (StrUtil.isBlank(token)) {
             return Result.fail("未登录");
         }
-        // 2. 删除Redis中的登录信息
+        // 2. 删除Redis中的登录信息，再删本机的登录态缓存并广播给其他副本（顺序不能反：先删本地的话，
+        //    并发请求可能在 Redis 删除之前又把它读回本地缓存）
         stringRedisTemplate.delete(RedisConstants.LOGIN_USER_KEY + token);
+        loginUserCache.evict(token);
         // 3. 清理ThreadLocal中的用户信息
         UserHolder.removeUser();
         return Result.ok();

@@ -136,6 +136,25 @@ MySQL 不限速、4 并发时 2 万次请求 0 失败；默认配置（连接池
 
 每次读 Feed 的 Redis 命令：`ZREVRANGEBYSCORE` 1 条 → `EXISTS` + `SINTER` + `ZREVRANGEBYSCORE` ×（1 + 关注的大 V 数），两次往返（原来一次）。
 
+### 1.9 登录态本地短缓存（2026-11-20，阶段 3 的 E4）
+
+| 场景 | 之前 | 之后 |
+| --- | --- | --- |
+| 带 token 的请求 | 每次一条 `HGETALL login:token:{token}` | 副本内缓存 15s（Caffeine，上限 20 万条），同一 token 每个副本每 15s 最多一次 `HGETALL` |
+| `POST /user/logout` | 删 Redis key | 删 Redis key → 删本机缓存 → Redis Pub/Sub（频道 `hmdp:local-cache:evict`）通知其他副本删除 |
+| 退出登录后，其他副本上这个 token | 立即失效 | 收到广播后失效（通常是毫秒级）；广播丢失时最多 15s 后失效 |
+| token 在 Redis 里过期 / 被手工删除 | 立即失效 | 最多 15s 后失效 |
+| 登录态续期 | 距上次续期超过 30 分钟时续期 | 不变；只在本地缓存未命中、刚读过 Redis 时判断 |
+| Redis 里的登录态没有 `id` 字段 | 当作已登录、用户 id 为空 | 按未登录处理 |
+
+- 开关：`LOGIN_LOCAL_CACHE_SECONDS`（默认 15），`0` 关闭，回到每个请求一次 `HGETALL`。
+- 这是一个安全上的取舍：被踢下线 / 退出登录的 token 在广播丢失时还能在其他副本上用最多一个 TTL。不能接受时调小 TTL 或关闭。
+- 每个副本多一条 Redis 订阅连接。这个广播通道是通用的（消息格式 `缓存名|key`），E5 的多级缓存复用它。
+- 指标：`cache_gets_total{cache="loginUser",result="hit|miss"}`、`cache_size{cache="loginUser"}`。
+
+本机验证：同一 token 请求 2000 次 `/user/me`，`HGETALL` 次数 关闭时 2000、开启时 1（2 个副本各 1000 次时共 2）。
+在副本 1 退出登录后立刻访问副本 2：5 次试验 4 次立即 401；应用启动后的第一次广播那次，紧跟着的一个请求仍返回了 200，1 秒后复查为 401。
+
 ## 2. Redis key 变化
 
 | key | 类型 | 说明 |
