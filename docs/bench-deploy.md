@@ -53,7 +53,13 @@ docker compose --env-file deploy/bench.env -f deploy/docker-compose.yml up -d my
 
 ```bash
 docker compose --env-file deploy/bench.env -f deploy/docker-compose.yml up -d redis kafka
+
+# 确认 Kafka 的对外地址：第一行应是「<中间件机内网 IP>:9094 (id: 1 ...」
+docker exec hmdp-kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9094 | head -1
 ```
+
+如果第一行是 `localhost:9094`，说明 `KAFKA_EXTERNAL_HOST` 没有生效（漏配，或启动时没带 `--env-file`）。
+这时应用机上的 app 能连上 9094，但拿到的 broker 地址是 `localhost`，秒杀订单发不出去。改好后重新 `up -d kafka`。
 
 **应用机**（先打 jar，再叠加监控和应用机专用覆盖文件）：
 
@@ -70,12 +76,13 @@ curl http://localhost:8081/shop/1        # 返回店铺 JSON 即三台机器已�
 
 ## 造数与压测（在压测机上）
 
-压测机需要 Docker、Python 3.8+、JDK 和 JMeter 5.5+。先把被测地址导出成环境变量，后面的脚本都认这一组：
+压测机需要 Docker、Python 3.12+、JDK 和 JMeter 5.5+。先把被测地址导出成环境变量，后面的脚本都认这一组：
 
 ```bash
 export NET=host MYSQL_HOST=10.0.0.11 MYSQL_PASSWORD=<密码> REDIS_HOST=10.0.0.12 KAFKA_BOOTSTRAP=10.0.0.12:9094
 
 # 1. 造数（默认 100 万用户 / 10 万店铺 / 1000 万订单）并生成 5000 个登录 token
+#    在空库上一次灌到目标规模；分几次调大 --orders 补出来的订单分布与一次灌满的不同
 python3 perf/baseline/seed_data.py --tokens 5000
 
 # 2. 组件单测

@@ -6,7 +6,7 @@
 # 默认通过 docker exec 操作本机的 hmdp-mysql / hmdp-redis 容器。
 # 分机部署（MySQL / Redis 在别的机器上）时指定地址，改用一次性客户端容器，变量与 component-bench.sh 通用：
 #   NET=host MYSQL_HOST=10.0.0.11 MYSQL_PASSWORD=xxx REDIS_HOST=10.0.0.12 bash perf/baseline/reset-seckill.sh
-# 券不存在时会一并创建（等价于先执行 perf/bench-voucher.sql）。
+# 券不存在时会一并创建（等价于先执行 perf/bench-voucher.sql）；已存在时只重置库存，不改活动时间。
 set -euo pipefail
 export MSYS_NO_PATHCONV=1
 VOUCHER_ID="${VOUCHER_ID:-21}"
@@ -35,7 +35,7 @@ mysql_exec -e "
     VALUES ($VOUCHER_ID, 1, 'seckill bench', 'bench', 'bench only', 100, 1000, 1, 1);
   INSERT INTO tb_seckill_voucher (voucher_id, stock, begin_time, end_time)
     VALUES ($VOUCHER_ID, $STOCK, NOW(), DATE_ADD(NOW(), INTERVAL 7 DAY))
-    ON DUPLICATE KEY UPDATE stock = VALUES(stock), begin_time = VALUES(begin_time), end_time = VALUES(end_time);
+    ON DUPLICATE KEY UPDATE stock = VALUES(stock);
   DELETE FROM tb_voucher_order WHERE voucher_id = $VOUCHER_ID;"
 redis_cli SET "seckill:stock:$VOUCHER_ID" "$STOCK" >/dev/null
 # 活动时间 key 不存在时 Lua 跳过时间校验（压测券可能在应用启动后才导入）

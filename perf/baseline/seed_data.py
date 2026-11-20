@@ -20,6 +20,9 @@
 
 可重复执行、可中断续跑：每一步的进度记在 seed_progress 表里，和该批数据在同一个事务提交。
 把目标调大后重跑只会补差额；目标比现有数据小则什么都不做（不会删数据）。
+注意：订单的时间和 id 是按 --orders 总数均匀铺开的。调大 --orders 后补的那部分订单会重新铺满整个时间段，
+id 插在已有订单之间（不冲突，但不再是主键顺序写入，时间分布也和一次灌满的不同）。
+要和别的基线对比，就在空库上一次灌到目标规模。
 
 生成的数据：
   tb_user / tb_user_info   id 接着现有最大值往后排到 --users；手机号 19 开头，不与现有数据冲突
@@ -27,7 +30,8 @@
   tb_voucher               id 从 1001 起（避开压测券 21 和 999999），每家店 --vouchers ÷ --shops 张；
                            其中 1/10 是秒杀券，活动都已结束（不会被应用启动时预热进 Redis）
   tb_blog                  作者集中在前 10% 的用户（创作者），点赞数长尾分布
-  tb_follow                每个用户关注 --follows-per-user 个创作者，头部创作者粉丝数可达数万（大 V）
+  tb_follow                每个用户关注 --follows-per-user 个创作者，头部创作者粉丝数可达数万（大 V）；
+                           tb_user_info 的 fans / followee 按关注关系回填
   tb_voucher_order         均匀分布在最近 --order-days 天；状态只有 已支付 / 已核销 / 已取消 / 已退款，
                            没有「未支付」——否则超时关单任务会把它们全部关掉并回补库存
   Redis shop:geo:{typeId}  店铺坐标（附近商铺查询用）
@@ -38,7 +42,7 @@
   2. 重新生成 token：加 --tokens <N>（或单独跑 --steps tokens），MySQL / Redis 不在本机时也能用；
   3. 压测加 --prop SHOP_MAX=<店铺数>。
 
-只依赖 Python 3.8+ 标准库和 docker。
+需要 Python 3.12+（只用标准库）和 docker。
 """
 import argparse
 import os
@@ -267,6 +271,14 @@ class Seeder:
                 "WHERE u <> f;\n")
             return one * a.follows_per_user
         self.run_step("follow", "关注 tb_follow（按用户）", start, a.users, sql)
+        if start < a.users:
+            # 粉丝数 / 关注数与 tb_follow 对齐（按全表重算，可重复执行）
+            log("回填 tb_user_info 的 fans / followee")
+            self.mysql(
+                "UPDATE tb_user_info i JOIN (SELECT follow_user_id AS u, COUNT(*) AS c FROM tb_follow GROUP BY follow_user_id) t\n"
+                "  ON t.u = i.user_id SET i.fans = t.c;\n"
+                "UPDATE tb_user_info i JOIN (SELECT user_id AS u, COUNT(*) AS c FROM tb_follow GROUP BY user_id) t\n"
+                "  ON t.u = i.user_id SET i.followee = t.c;\n")
 
     def seed_order(self):
         a = self.a
@@ -438,6 +450,8 @@ class Seeder:
 
 
 def main():
+    if sys.version_info < (3, 12):
+        die(f"需要 Python 3.12+，当前是 {sys.version.split()[0]}")
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")

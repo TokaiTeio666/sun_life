@@ -17,7 +17,7 @@
 - 不要叠加 `docker-compose.tracing.yml`（agent 有开销）；
 - 每轮压测时 Grafana 时间范围对准压测窗口，截图「容量」「JVM 与连接池」「Redis」「MySQL」「Kafka」几组面板存档。
 
-工具：`component-bench.sh` 需要 bash + docker；`baseline.py`、`capacity_model.py` 只用 Python 3.8+ 标准库；JMeter 5.5+。
+工具：`component-bench.sh` 需要 bash + docker；`baseline.py`、`capacity_model.py`、`seed_data.py` 只用标准库，需要 Python 3.12+；JMeter 5.5+。
 
 ## 第 0 步：造数
 
@@ -31,6 +31,7 @@ python perf/baseline/seed_data.py --users 100000 --shops 10000 --orders 1000000 
 
 - 数据由 MySQL 服务端 `INSERT ... SELECT` 生成，客户端是一次性容器，连接参数与 `component-bench.sh` 通用（`NET`、`MYSQL_HOST` 等）；
 - 可重复执行、可中断续跑（进度记在 `seed_progress` 表），调大目标后重跑只补差额，不会删数据；
+  但分几次调大 `--orders` 补出来的订单，时间分布和主键顺序与一次灌满的不同，要对比基线就在空库上一次灌到目标规模；
 - 同时生成笔记、关注关系（含粉丝数万的大 V）、优惠券，以及 Redis 里的店铺坐标和关注收件箱，混合场景的每个接口都有数据可读；
 - 订单没有「未支付」状态、秒杀券活动都已结束，不会触发超时关单，也不会拖慢应用启动；
 - 灌数默认不写 binlog（有从库或托管数据库不允许时加 `--keep-binlog`）。
