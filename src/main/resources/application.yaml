@@ -2,6 +2,7 @@ server:
   port: 8081
   tomcat:
     # 线程数要与下游连接池匹配：200 个线程抢 10 个 DB 连接只会在池上排队
+    # （仅在 hmdp.web.virtual-threads=false 时生效）
     threads:
       max: 200
       min-spare: 20
@@ -71,6 +72,10 @@ spring:
       concurrency: 3
 # 业务自定义配置
 hmdp:
+  web:
+    # JDK 21 虚拟线程：Tomcat 每个请求一个虚拟线程（只切换请求线程，Kafka 消费者与定时任务仍用平台线程，
+    # 原因见 VirtualThreadConfig）。开启后并发上限由下游连接池决定。回退 / A/B 对比：VIRTUAL_THREADS=false
+    virtual-threads: ${VIRTUAL_THREADS:true}
   # 图片上传根目录：多实例部署时必须是共享存储（docker volume / NFS），或替换为 OSS 实现
   upload:
     dir: ${HMDP_UPLOAD_DIR:./upload}

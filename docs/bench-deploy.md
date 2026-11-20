@@ -65,7 +65,7 @@ docker exec hmdp-kafka /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-s
 
 ```bash
 # 没装 JDK / Maven 时用容器打包
-docker run --rm -v "$PWD":/w -v hmdp-m2:/root/.m2 -w /w maven:3.9-eclipse-temurin-17 mvn -q clean package -DskipTests
+docker run --rm -v "$PWD":/w -v hmdp-m2:/root/.m2 -w /w maven:3.9-eclipse-temurin-21 mvn -q clean package -DskipTests
 
 BENCH="--env-file deploy/bench.env -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml -f deploy/docker-compose.bench-app.yml --profile resources"
 docker compose $BENCH up -d --build --scale app=1

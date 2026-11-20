@@ -43,6 +43,10 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | 链路 | SkyWalking agent | 单个请求在 Redis / MySQL / Kafka 各段的耗时 |
 | 业务 | 自定义 Micrometer（`com.hmdp.metrics`） | 见下表 |
 
+> **虚拟线程下的线程指标**：应用默认用 JDK 21 虚拟线程处理请求（`VIRTUAL_THREADS=false` 可关闭），这时 Tomcat 没有线程池，
+> `tomcat_threads_*` 恒为 -1，Grafana 的「Tomcat 繁忙线程」面板没有意义，`TomcatThreadsSaturated` 告警也不会触发。
+> 并发上限变成下游连接池，应用是否饱和看 `hikaricp_connections_pending`（有请求在等 DB 连接）和接口 P99。
+
 **HTTP 分位数为什么用直方图**：开启了 `percentiles-histogram`，P95 / P99 在 Prometheus 端用 `histogram_quantile` 跨实例聚合；
 客户端预计算的分位数无法跨副本合并。
 

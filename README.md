@@ -1,6 +1,6 @@
 # sun_life（黑马点评 · 秒杀模块 Kafka 改造版）
 
-> 基于黑马程序员《Spring Boot 实战》课程项目 **hm-dianping** 二次开发。核心改造：秒杀链路从 **Redis Stream 异步下单**升级为 **Kafka 异步下单**（`acks=all` + 幂等生产者 + 手动提交 offset + 重试/DLT）；技术栈升级到 **Java 17 / Spring Boot 3 / MySQL 8 / Redis 7 / Kafka 3.7**；补齐**布隆过滤器、TTL 抖动、点赞 BitMap、UV HyperLogLog** 等缓存与统计能力。本项目用于学习与简历展示，**非独立自研项目**，改造与新增部分为本人独立完成。
+> 基于黑马程序员《Spring Boot 实战》课程项目 **hm-dianping** 二次开发。核心改造：秒杀链路从 **Redis Stream 异步下单**升级为 **Kafka 异步下单**（`acks=all` + 幂等生产者 + 手动提交 offset + 重试/DLT）；技术栈升级到 **Java 21（虚拟线程）/ Spring Boot 3 / MySQL 8 / Redis 7 / Kafka 3.7**；补齐**布隆过滤器、TTL 抖动、点赞 BitMap、UV HyperLogLog** 等缓存与统计能力。本项目用于学习与简历展示，**非独立自研项目**，改造与新增部分为本人独立完成。
 
 ---
 
@@ -20,7 +20,7 @@
 
 | 分类 | 技术 | 用途 |
 | --- | --- | --- |
-| 基础框架 | Spring Boot 3.3.5 / Java 17 | 应用骨架 |
+| 基础框架 | Spring Boot 3.3.5 / Java 21 | 应用骨架；Tomcat 请求线程使用虚拟线程（`VIRTUAL_THREADS=false` 可关闭） |
 | 持久层 | MyBatis-Plus 3.5.7 / MySQL 8 | ORM 与数据存储 |
 | 缓存 | Redis 7（StringRedisTemplate） | 缓存、布隆过滤器、BitMap、HyperLogLog、GEO、ZSet Feed 流 |
 | 分布式锁 | Redisson 3.32.0 | 可重入锁、防重复下单、联锁（测试） |
@@ -250,7 +250,7 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 | `mysql` | mysql:8.0 | 首次启动自动导入 `hmdp.sql` 建库建表（关闭严格模式兼容课程 SQL），数据卷 `hmdp-mysql8-data` |
 | `redis` | redis:7.2 | 缓存/布隆过滤器/位图/HLL/锁/库存 |
 | `kafka` | apache/kafka:3.7.0 | KRaft 单节点，秒杀异步消息 / 重试 / DLT |
-| `app` | 本地构建（eclipse-temurin:17-jre） | Spring Boot 3 应用，无状态，可 `--scale app=N` 多副本 |
+| `app` | 本地构建（eclipse-temurin:21-jre） | Spring Boot 3 应用，无状态，可 `--scale app=N` 多副本 |
 | `frontend` | nginx:1.18-alpine | 前端静态页 + 网关：`/api`（8080）与 8081 入口均负载均衡到所有 `app` 副本，秒杀接口限流 |
 
 > 访问方式：
@@ -345,7 +345,7 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 | `utils/CacheClient.java` | 空值缓存 + 互斥锁/逻辑过期 + TTL ±10% 抖动 |
 | `service/impl/BlogServiceImpl.java` | 点赞 BitMap（userId 作 offset）+ 有界 ZSet TopN + 日 UV HyperLogLog |
 | `controller/BlogController.java` | 新增 `GET /blog/uv/{id}` 日 UV 查询 |
-| `pom.xml` / `application.yaml` / `deploy/Dockerfile` / `deploy/docker-compose.yml` | 升级 Java 17 / Spring Boot 3 / MySQL 8 / Redis 7，补齐 Boot 3 配置 |
+| `pom.xml` / `application.yaml` / `deploy/Dockerfile` / `deploy/docker-compose.yml` | 升级 Java 21 / Spring Boot 3 / MySQL 8 / Redis 7，补齐 Boot 3 配置 |
 | `perf/gen_tokens.ps1` / `perf/bench-voucher.sql` / `perf/shop-detail-bench.jmx` | 无 Python 依赖的压测数据准备与缓存 A/B 脚本 |
 | `perf/lock-failover-demo.ps1` | 复现 Redis 主从切换导致分布式锁失效，验证 DB 唯一索引兜底的必要性 |
 

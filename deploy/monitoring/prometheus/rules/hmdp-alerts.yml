@@ -53,10 +53,13 @@ groups:
           summary: "{{ $labels.instance }} 有线程在等 DB 连接"
           description: "连接池已打满：DB 变慢，或 DB_POOL_MAX 偏小。先看 MySQL 慢查询与行锁等待。"
 
+      # 只在关闭虚拟线程（VIRTUAL_THREADS=false）时有意义：虚拟线程下 Tomcat 没有线程池，
+      # 这几个指标恒为 -1，用 > 0 过滤掉，否则 -1 / -1 = 1 会误报。
+      # 虚拟线程下的饱和信号看上面的 HikariPending 和接口 P99。
       - alert: TomcatThreadsSaturated
         expr: |
           max by (instance) (tomcat_threads_busy_threads{job="hmdp-app"})
-          / max by (instance) (tomcat_threads_config_max_threads{job="hmdp-app"}) > 0.8
+          / (max by (instance) (tomcat_threads_config_max_threads{job="hmdp-app"}) > 0) > 0.8
         for: 5m
         labels: {severity: P2}
         annotations:

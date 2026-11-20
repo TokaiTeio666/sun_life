@@ -1,10 +1,10 @@
 # sun_life 应用镜像
 # 构建上下文为项目根目录（docker-compose 中指定 context: ..）
-# 基础镜像：Eclipse Temurin JDK17（Debian）
-FROM eclipse-temurin:17-jre
+# 基础镜像：Eclipse Temurin JDK21（Debian）
+FROM eclipse-temurin:21-jre
 
 LABEL maintainer="sun_life" \
-      description="sun_life backend (Spring Boot 3.3.5 / Java 17 / Kafka 3.7)"
+      description="sun_life backend (Spring Boot 3.3.5 / Java 21 / Kafka 3.7)"
 
 WORKDIR /app
 

@@ -1,5 +1,7 @@
 package com.hmdp.utils;
 
+import org.springframework.data.redis.connection.BitFieldSubCommands;
+import org.springframework.data.redis.connection.BitFieldSubCommands.BitFieldType;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
@@ -16,6 +18,10 @@ import java.util.List;
  *
  * <p>布隆过滤器只保证「不存在的一定不存在」，删除操作无法安全支持；
  * 商铺通常只增不删，新增时调用 {@link #add(long)} 补充。</p>
+ *
+ * <p>一个 id 对应的 k 个位用一条 {@code BITFIELD} 命令读写（每个位是一个 u1 子命令），
+ * 而不是 k 条 GETBIT / SETBIT：Redis 每个请求只执行 1 条命令。BITFIELD 与 GETBIT / SETBIT
+ * 的位偏移编号相同，所以与旧版本写入的位图兼容。</p>
  */
 @Component
 public class RedisBloomFilter {
@@ -46,13 +52,7 @@ public class RedisBloomFilter {
     }
 
     public void add(long value) {
-        long[] offsets = offsets(value);
-        redis.executePipelined((RedisCallback<Object>) connection -> {
-            for (long offset : offsets) {
-                connection.stringCommands().setBit(keyBytes, offset, true);
-            }
-            return null;
-        });
+        redis.opsForValue().bitField(KEY, setCommands(offsets(value)));
     }
 
     /** 批量写入，启动预热时一次 pipeline 完成，避免逐条往返。 */
@@ -62,9 +62,7 @@ public class RedisBloomFilter {
         }
         redis.executePipelined((RedisCallback<Object>) connection -> {
             for (Long value : values) {
-                for (long offset : offsets(value)) {
-                    connection.stringCommands().setBit(keyBytes, offset, true);
-                }
+                connection.stringCommands().bitField(keyBytes, setCommands(offsets(value)));
             }
             return null;
         });
@@ -73,29 +71,29 @@ public class RedisBloomFilter {
     /** 返回 false 表示该 id 一定不存在；返回 true 表示可能存在（存在误判）。 */
     public boolean mightContain(long value) {
         long[] offsets = offsets(value);
-        List<Object> bits = redis.executePipelined((RedisCallback<Object>) connection -> {
-            for (long offset : offsets) {
-                connection.stringCommands().getBit(keyBytes, offset);
-            }
-            return null;
-        });
-        // Redis 不可用等异常场景宁可放行，避免布隆过滤器成为单点故障
+        BitFieldSubCommands commands = BitFieldSubCommands.create();
+        for (long offset : offsets) {
+            commands = commands.get(BitFieldType.unsigned(1)).valueAt(offset);
+        }
+        List<Long> bits = redis.opsForValue().bitField(KEY, commands);
+        // 返回结果异常时宁可放行，避免布隆过滤器把存在的商铺挡掉
         if (bits == null || bits.size() != offsets.length) {
             return true;
         }
-        for (Object bit : bits) {
-            if (!isSet(bit)) {
+        for (Long bit : bits) {
+            if (bit == null || bit != 1L) {
                 return false;
             }
         }
         return true;
     }
 
-    private static boolean isSet(Object bit) {
-        if (bit instanceof Boolean b) {
-            return b;
+    private static BitFieldSubCommands setCommands(long[] offsets) {
+        BitFieldSubCommands commands = BitFieldSubCommands.create();
+        for (long offset : offsets) {
+            commands = commands.set(BitFieldType.unsigned(1)).valueAt(offset).to(1);
         }
-        return bit instanceof Number n && n.longValue() == 1L;
+        return commands;
     }
 
     /**

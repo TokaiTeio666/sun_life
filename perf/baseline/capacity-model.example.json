@@ -9,8 +9,8 @@
   },
   "redundancy": 1.5,
   "interfaces": [
-    {"name": "店铺详情 /shop/{id}", "share": 0.70, "redis": 9, "mysql_read": 0.001, "mysql_write": 0, "kafka": 0,
-     "_redis": "SkyWalking 实测：布隆过滤器 7 次逐个 GETBIT + 缓存 GET，登录用户再加 1 次 HGETALL（布隆过滤器改 pipeline / Lua 可降到 3 次）"},
+    {"name": "店铺详情 /shop/{id}", "share": 0.70, "redis": 3, "mysql_read": 0.001, "mysql_write": 0, "kafka": 0,
+     "_redis": "布隆过滤器 1 次 BITFIELD（原先是 7 次逐个 GETBIT）+ 缓存 GET，登录用户再加 1 次 HGETALL"},
     {"name": "热门笔记 / Feed", "share": 0.25, "redis": 3, "mysql_read": 0.05, "mysql_write": 0, "kafka": 0,
      "_redis": "HGETALL + 分页缓存 GET + pipeline GETBIT（算 1 次往返）"},
     {"name": "秒杀 /voucher-order/seckill/{id}", "share": 0.05, "redis": 3, "mysql_read": 0, "mysql_write": 0.04, "kafka": 1,
