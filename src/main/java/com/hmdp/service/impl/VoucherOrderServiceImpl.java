@@ -12,6 +12,7 @@ import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SeckillSoldOutFlags;
 import com.hmdp.utils.UserHolder;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -65,6 +66,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private BizMetrics bizMetrics;
 
+    @Resource
+    private SeckillSoldOutFlags soldOutFlags;
+
     /** 订单超时时长（分钟），超时扫描任务使用 */
     @Value("${hmdp.order.timeout-minutes:30}")
     private long timeoutMinutes;
@@ -90,6 +94,12 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Override
     public Result seckillVoucher(Long voucherId) {
         Long userId = UserHolder.getUser().getId();
+        //0. 售罄本地标记：这张券刚被确认卖完，直接返回，不生成订单号、不执行 Lua。
+        //   标记期间不再区分「重复下单 / 已结束」，一律返回库存不足
+        if (soldOutFlags.isSoldOut(voucherId)) {
+            bizMetrics.seckillSoldOutShortcut();
+            return Result.fail("库存不足");
+        }
         long orderId = redisIdWorker.nextId("order");
 
         //1. Lua 原子完成活动时间校验、库存校验、一人一单与扣减库存
@@ -100,6 +110,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         );
         int r = result == null ? 1 : result.intValue();
         bizMetrics.seckillRequest(r);
+        if (r == 1) {
+            soldOutFlags.mark(voucherId);
+        }
         if (r != 0) {
             return Result.fail(switch (r) {
                 case 2 -> "不能重复下单";
@@ -144,6 +157,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                     Collections.emptyList(),
                     voucherId.toString(), userId.toString()
             );
+            // 库存补回了一件：清除售罄标记，否则这一件卖不出去
+            soldOutFlags.clear(voucherId);
             bizMetrics.sendFailure(true);
         } catch (Exception rollbackEx) {
             bizMetrics.sendFailure(false);
@@ -324,6 +339,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 return null;
             }
         });
+        // 库存已回补：清除各副本的售罄标记
+        closed.stream().map(VoucherOrder::getVoucherId).distinct().forEach(soldOutFlags::clear);
     }
 
     @Override

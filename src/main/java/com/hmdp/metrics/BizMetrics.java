@@ -68,6 +68,7 @@ public class BizMetrics {
     private final Counter dbStockShort;
     private final Counter deadLetters;
     private final Counter timeoutClosed;
+    private final Counter seckillSoldOutShortcut;
     private final Counter feedFanoutPush;
     private final Counter feedFanoutPull;
     private final Counter feedPushedEntries;
@@ -109,6 +110,8 @@ public class BizMetrics {
                 .description("进入死信主题的秒杀订单消息数").register(registry);
         timeoutClosed = Counter.builder("hmdp.order.timeout.closed")
                 .description("超时未支付被关闭的订单数").register(registry);
+        seckillSoldOutShortcut = Counter.builder("hmdp.seckill.soldout.shortcut")
+                .description("被售罄本地标记直接拒绝的秒杀请求数（没有执行 Lua；不计入 hmdp.seckill.requests）").register(registry);
         feedFanoutPush = Counter.builder("hmdp.feed.fanout")
                 .description("笔记 Feed 分发次数（mode=push 推送到粉丝收件箱；pull 大 V 不推送，由粉丝读取时拉取）")
                 .tag("mode", "push").register(registry);
@@ -147,6 +150,10 @@ public class BizMetrics {
 
     public void feedFanoutFailed() {
         feedFanoutFailures.increment();
+    }
+
+    public void seckillSoldOutShortcut() {
+        seckillSoldOutShortcut.increment();
     }
 
     public void seckillRequest(int luaCode) {

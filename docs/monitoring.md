@@ -55,6 +55,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | 指标 | 类型 | 含义 |
 | --- | --- | --- |
 | `hmdp_seckill_requests_total{result}` | counter | 秒杀请求按 Lua 结果计数：success / sold_out / duplicate / not_started / ended |
+| `hmdp_seckill_soldout_shortcut_total` | counter | 被售罄本地标记直接拒绝的秒杀请求数（没有执行 Lua，不计入上一行）；秒杀请求总数 = 两者之和 |
 | `hmdp_seckill_send_failures_total{rollback}` | counter | 订单消息投递 Kafka 失败；`rollback=failed` 表示 Redis 库存回滚也失败，必须人工对账 |
 | `hmdp_seckill_orders_persisted_total{path}` | counter | 消费端实际落库订单数；`batch` 批量快速路径、`single` 逐条降级路径 |
 | `hmdp_seckill_stock_update_orders` | summary | 每条库存 UPDATE 合并的订单数，`_sum / _count` = **批量聚合度**，`_count` = 热点行 UPDATE 次数 |

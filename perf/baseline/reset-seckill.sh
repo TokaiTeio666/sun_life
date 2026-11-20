@@ -38,6 +38,8 @@ mysql_exec -e "
     ON DUPLICATE KEY UPDATE stock = VALUES(stock);
   DELETE FROM tb_voucher_order WHERE voucher_id = $VOUCHER_ID;"
 redis_cli SET "seckill:stock:$VOUCHER_ID" "$STOCK" >/dev/null
+# 通知各副本清除这张券的售罄本地标记（不发的话要等标记自己过期，默认 5s）
+redis_cli PUBLISH "hmdp:local-cache:evict" "soldOut|$VOUCHER_ID" >/dev/null
 # 活动时间 key 不存在时 Lua 跳过时间校验（压测券可能在应用启动后才导入）
 redis_cli DEL "seckill:order:$VOUCHER_ID" "seckill:time:$VOUCHER_ID" >/dev/null
 echo "券 $VOUCHER_ID 已重置：库存 $STOCK"

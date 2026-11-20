@@ -102,6 +102,11 @@ hmdp:
     fpp: 0.01
     # 增量同步间隔：补上不经过本副本写入的新商铺，并检查位图是否丢失
     sync-interval-ms: 60000
+  # 秒杀售罄本地标记（见 SeckillSoldOutFlags）：Lua 返回库存不足后在副本内记几秒，期间该券的请求直接返回，不访问 Redis。
+  # 库存回补（超时关单、发送失败回滚）时广播清除；ttl 是广播丢失或直接改 Redis 库存时的兜底
+  seckill:
+    soldout-flag: ${SECKILL_SOLDOUT_FLAG:true}
+    soldout-ttl-seconds: 5
   # 登录态本地短缓存（见 LoginUserCache）：token → 用户在副本内缓存若干秒，省掉每个请求一次 HGETALL。
   # 退出登录 / token 过期在其他副本上最多延迟这么久生效；0 = 关闭
   login:

@@ -32,6 +32,9 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    private com.hmdp.utils.SeckillSoldOutFlags soldOutFlags;
+
     @Override
     public Result queryVoucherOfShop(Long shopId) {
         // 查询优惠券信息
@@ -56,5 +59,7 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         stringRedisTemplate.opsForValue().set(RedisConstants.SECKILL_STOCK_KEY + voucher.getId(), voucher.getStock().toString());
         com.hmdp.config.SeckillStockInitializer.cacheSeckillTime(stringRedisTemplate, voucher.getId(),
                 voucher.getBeginTime(), voucher.getEndTime());
+        // 这个 id 之前被请求过（当时券还不存在）的话，副本上可能留有售罄标记
+        soldOutFlags.clear(voucher.getId());
     }
 }
