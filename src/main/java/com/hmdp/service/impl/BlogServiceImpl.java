@@ -4,6 +4,8 @@ import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.RandomUtil;
 import cn.hutool.core.util.StrUtil;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.ScrollResult;
@@ -19,6 +21,7 @@ import com.hmdp.utils.LocalCache;
 import com.hmdp.utils.SystemConstants;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.StringRedisConnection;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -26,6 +29,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.Resource;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Collections;
@@ -37,6 +41,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_BIT_KEY;
+import static com.hmdp.utils.RedisConstants.BLOG_LIKE_DELTA_KEY;
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_TOP_KEY;
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_TOP_LIMIT;
 import static com.hmdp.utils.RedisConstants.BLOG_UV_KEY;
@@ -55,19 +60,41 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
     /**
      * 原子切换点赞状态：返回切换前的状态（0 = 原来未点赞，本次变为已点赞；1 = 原来已点赞，本次取消）。
-     * KEYS[1] = 位图 key，KEYS[2] = TopN ZSet key；ARGV[1] = userId，ARGV[2] = 当前毫秒，ARGV[3] = TopN 上限
+     * KEYS[1] = 位图 key，KEYS[2] = TopN ZSet key，KEYS[3] = 待回写的点赞数增量 hash；
+     * ARGV[1] = userId，ARGV[2] = 当前毫秒，ARGV[3] = TopN 上限，ARGV[4] = blogId，ARGV[5] = 是否记录增量（1 / 0）
+     *
+     * <p>ARGV[5] = 1 时把 ±1 累加到增量 hash 的 blogId 字段，由 LikeCountFlusher 定时批量写回 tb_blog.liked；
+     * 点赞又取消、增量归零的字段直接删掉，不用白写一次库。</p>
      */
     private static final DefaultRedisScript<Long> TOGGLE_LIKE_SCRIPT = new DefaultRedisScript<>(
             "local old = redis.call('getbit', KEYS[1], ARGV[1]) " +
+            "local delta " +
             "if old == 0 then " +
             "  redis.call('setbit', KEYS[1], ARGV[1], 1) " +
             "  redis.call('zadd', KEYS[2], ARGV[2], ARGV[1]) " +
             "  redis.call('zremrangebyrank', KEYS[2], tonumber(ARGV[3]), -1) " +
+            "  delta = 1 " +
             "else " +
             "  redis.call('setbit', KEYS[1], ARGV[1], 0) " +
             "  redis.call('zrem', KEYS[2], ARGV[1]) " +
+            "  delta = -1 " +
+            "end " +
+            "if ARGV[5] == '1' then " +
+            "  if redis.call('hincrby', KEYS[3], ARGV[4], delta) == 0 then " +
+            "    redis.call('hdel', KEYS[3], ARGV[4]) " +
+            "  end " +
             "end " +
             "return old", Long.class);
+
+    /** 点赞数异步回写：true 时点赞接口只写 Redis；false 回到每次点赞更新一次 tb_blog */
+    @Value("${hmdp.like.async-flush:true}")
+    private boolean likeAsyncFlush;
+
+    /** 已确认存在的笔记 id（笔记没有删除接口，可以缓存较久）：异步回写时点赞接口用它判断笔记是否存在，不必每次查库 */
+    private final Cache<Long, Boolean> existingBlogIds = Caffeine.newBuilder()
+            .maximumSize(200_000)
+            .expireAfterWrite(Duration.ofMinutes(10))
+            .build();
 
     @Resource
     private IUserService userService;
@@ -133,9 +160,21 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         Long userId = UserHolder.getUser().getId();
         String bitKey = BLOG_LIKED_BIT_KEY + id;
         String topKey = BLOG_LIKED_TOP_KEY + id;
+        List<String> keys = List.of(bitKey, topKey, BLOG_LIKE_DELTA_KEY);
+        if (likeAsyncFlush) {
+            //0. 异步回写：先确认笔记存在（本地缓存，未命中才查一次主键），再只写 Redis；点赞数由定时任务批量写回 DB
+            if (!blogExists(id)) {
+                return Result.fail("笔记不存在！");
+            }
+            stringRedisTemplate.execute(TOGGLE_LIKE_SCRIPT, keys,
+                    userId.toString(), String.valueOf(System.currentTimeMillis()), String.valueOf(BLOG_LIKED_TOP_LIMIT),
+                    id.toString(), "1");
+            return Result.ok();
+        }
         //1. Redis 原子切换点赞状态（避免 GETBIT + SETBIT 之间并发重复点赞，一次往返完成 bit + TopN）
-        Long old = stringRedisTemplate.execute(TOGGLE_LIKE_SCRIPT, List.of(bitKey, topKey),
-                userId.toString(), String.valueOf(System.currentTimeMillis()), String.valueOf(BLOG_LIKED_TOP_LIMIT));
+        Long old = stringRedisTemplate.execute(TOGGLE_LIKE_SCRIPT, keys,
+                userId.toString(), String.valueOf(System.currentTimeMillis()), String.valueOf(BLOG_LIKED_TOP_LIMIT),
+                id.toString(), "0");
         boolean nowLiked = old != null && old == 0L;
         //2. 只有状态确实变化时才更新 DB 点赞数
         boolean isSuccess = update()
@@ -144,11 +183,24 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .update();
         if (!isSuccess) {
             // 笔记不存在：把 Redis 状态切回去
-            stringRedisTemplate.execute(TOGGLE_LIKE_SCRIPT, List.of(bitKey, topKey),
-                    userId.toString(), String.valueOf(System.currentTimeMillis()), String.valueOf(BLOG_LIKED_TOP_LIMIT));
+            stringRedisTemplate.execute(TOGGLE_LIKE_SCRIPT, keys,
+                    userId.toString(), String.valueOf(System.currentTimeMillis()), String.valueOf(BLOG_LIKED_TOP_LIMIT),
+                    id.toString(), "0");
             return Result.fail("笔记不存在！");
         }
         return Result.ok();
+    }
+
+    private boolean blogExists(Long id) {
+        if (existingBlogIds.getIfPresent(id) != null) {
+            return true;
+        }
+        // 不存在的 id 不缓存：防止随机 id 把缓存挤满
+        boolean exists = query().select("id").eq("id", id).count() > 0;
+        if (exists) {
+            existingBlogIds.put(id, Boolean.TRUE);
+        }
+        return exists;
     }
 
     @Override

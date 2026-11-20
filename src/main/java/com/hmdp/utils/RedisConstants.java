@@ -27,6 +27,10 @@ public class RedisConstants {
     /** 点赞时间有序集合，仅保留前 N 个用于「点赞用户 TopN」展示 */
     public static final String BLOG_LIKED_TOP_KEY = "blog:liked:top:";
     public static final int BLOG_LIKED_TOP_LIMIT = 1000;
+    /** 待回写的点赞数增量（hash：field = 笔记 id，value = 尚未写回 tb_blog.liked 的增量），由 LikeCountFlusher 定时批量回写 */
+    public static final String BLOG_LIKE_DELTA_KEY = "blog:like:delta";
+    /** 正在回写的那一批增量：回写前把上面的 hash 改名到这里，写库成功后删除；写库失败时保留，下一轮重试 */
+    public static final String BLOG_LIKE_DELTA_FLUSHING_KEY = "blog:like:delta:flushing";
     /** 笔记日 UV：HyperLogLog，标准误差约 0.81% */
     public static final String BLOG_UV_KEY = "uv:blog:";
     public static final String FEED_KEY = "feed:";

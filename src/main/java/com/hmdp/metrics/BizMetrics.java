@@ -68,6 +68,8 @@ public class BizMetrics {
     private final Counter dbStockShort;
     private final Counter deadLetters;
     private final Counter timeoutClosed;
+    private final Counter likeFlushedRows;
+    private final Counter likeFlushFailures;
     private final Counter seckillSoldOutShortcut;
     private final Counter feedFanoutPush;
     private final Counter feedFanoutPull;
@@ -110,6 +112,10 @@ public class BizMetrics {
                 .description("进入死信主题的秒杀订单消息数").register(registry);
         timeoutClosed = Counter.builder("hmdp.order.timeout.closed")
                 .description("超时未支付被关闭的订单数").register(registry);
+        likeFlushedRows = Counter.builder("hmdp.like.flushed.rows")
+                .description("点赞数回写更新的 tb_blog 行数（同一篇笔记在一轮内的多次点赞合并成一行）").register(registry);
+        likeFlushFailures = Counter.builder("hmdp.like.flush.failures")
+                .description("点赞数回写失败的轮数（增量保留在 Redis，下一轮重试）").register(registry);
         seckillSoldOutShortcut = Counter.builder("hmdp.seckill.soldout.shortcut")
                 .description("被售罄本地标记直接拒绝的秒杀请求数（没有执行 Lua；不计入 hmdp.seckill.requests）").register(registry);
         feedFanoutPush = Counter.builder("hmdp.feed.fanout")
@@ -150,6 +156,16 @@ public class BizMetrics {
 
     public void feedFanoutFailed() {
         feedFanoutFailures.increment();
+    }
+
+    public void likeFlushed(int rows) {
+        if (rows > 0) {
+            likeFlushedRows.increment(rows);
+        }
+    }
+
+    public void likeFlushFailed() {
+        likeFlushFailures.increment();
     }
 
     public void seckillSoldOutShortcut() {
