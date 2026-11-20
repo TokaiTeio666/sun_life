@@ -110,6 +110,8 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "${APP_KAFKA_BOOTSTRAP:-kafka:9092}"
       # 压测开关：false 时商铺详情直查 MySQL（用于缓存 A/B 对比）
       HMDP_CACHE_ENABLED: "${HMDP_CACHE_ENABLED:-true}"
+      # 商铺布隆过滤器的设计容量（店铺数上限）；改动后启动时自动换新位图并重新预热
+      BLOOM_EXPECTED_INSERTIONS: "${BLOOM_EXPECTED_INSERTIONS:-1000000}"
       # 图片写共享卷，任意副本上传、nginx 直接对外提供
       HMDP_UPLOAD_DIR: "/data/upload"
       # 每个副本的 DB 连接池上限；副本数 × 该值需小于 MySQL max_connections

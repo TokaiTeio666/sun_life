@@ -132,7 +132,7 @@ sequenceDiagram
 
 | 问题 | 方案 | 实现位置 |
 | --- | --- | --- |
-| **穿透** | Redis BitMap 布隆过滤器前置拦截（预期 1 万条、误判率 1%，双哈希 7 个函数）；另保留空值缓存兜底 | `RedisBloomFilter` / `BloomFilterInitializer` |
+| **穿透** | Redis BitMap 布隆过滤器前置拦截（设计容量默认 100 万条、可配置，误判率 1%，双哈希 7 个函数）；另保留空值缓存兜底 | `RedisBloomFilter` / `BloomFilterInitializer` |
 | **击穿** | 互斥锁（`SimpleRedisLock` + Redisson）与 **逻辑过期** 双方案，封装通用 `CacheClient` | `CacheClient` |
 | **雪崩** | 所有 TTL 统一叠加 **±10% 随机抖动**，避免同批 key 同时失效 | `CacheClient#jitteredSeconds` |
 | **一致性** | 先更新 DB 再删缓存，配合过期兜底 | `ShopServiceImpl#update` |
@@ -340,8 +340,8 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 | `service/impl/VoucherOrderServiceImpl.java` | Lua 扣减 + 异步 Kafka + 发送失败回滚 + 超时关单 |
 | `resources/seckill.lua` / `seckill_rollback.lua` | Lua 只做扣减；新增投递失败补偿脚本 |
 | `config/SeckillStockInitializer.java` | 启动时自动预热秒杀库存到 Redis（幂等，Docker 一键启动后立即可秒杀） |
-| `utils/RedisBloomFilter.java` | Redis BitMap 布隆过滤器（双哈希、pipeline 批量写入、启动预热） |
-| `config/BloomFilterInitializer.java` | 启动时把商铺 id 预热进布隆过滤器 |
+| `utils/RedisBloomFilter.java` | Redis BitMap 布隆过滤器（双哈希、一条 BITFIELD 读写、容量可配置、key 带位图参数） |
+| `config/BloomFilterInitializer.java` | 启动时按 id 游标分批把商铺 id 预热进布隆过滤器，之后定时增量同步 |
 | `utils/CacheClient.java` | 空值缓存 + 互斥锁/逻辑过期 + TTL ±10% 抖动 |
 | `service/impl/BlogServiceImpl.java` | 点赞 BitMap（userId 作 offset）+ 有界 ZSet TopN + 日 UV HyperLogLog |
 | `controller/BlogController.java` | 新增 `GET /blog/uv/{id}` 日 UV 查询 |

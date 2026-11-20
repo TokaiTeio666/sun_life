@@ -38,7 +38,7 @@ id 插在已有订单之间（不冲突，但不再是主键顺序写入，时�
   Redis feed:{userId}      前 --feed-users 个用户的关注收件箱（最近 --feed-days 天的笔记）
 
 灌完之后：
-  1. 重启 app（布隆过滤器在启动时预热，不重启的话新店铺会被判为「不存在」）；
+  1. 重启 app（布隆过滤器在启动时预热；不重启的话要等定时增量同步，默认 1 分钟一轮，期间新店铺会被判为「不存在」）；
   2. 重新生成 token：加 --tokens <N>（或单独跑 --steps tokens），MySQL / Redis 不在本机时也能用；
   3. 压测加 --prop SHOP_MAX=<店铺数>。
 
@@ -426,7 +426,7 @@ class Seeder:
         a = self.a
         print(
             "\n接下来：\n"
-            "  1. 重启 app，让布隆过滤器重新预热（不重启的话新店铺会被判为「不存在」）：\n"
+            "  1. 重启 app，让布隆过滤器重新预热（不重启的话要等定时增量同步，默认 1 分钟一轮）：\n"
             "       docker compose -f deploy/docker-compose.yml restart app frontend\n"
             "  2. 重新生成 token：python perf/baseline/seed_data.py --steps tokens --tokens 2000\n"
             f"  3. 压测时加 --prop SHOP_MAX={a.shops}，例如：\n"

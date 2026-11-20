@@ -36,12 +36,13 @@ python perf/baseline/seed_data.py --users 100000 --shops 10000 --orders 1000000 
 - 订单没有「未支付」状态、秒杀券活动都已结束，不会触发超时关单，也不会拖慢应用启动；
 - 灌数默认不写 binlog（有从库或托管数据库不允许时加 `--keep-binlog`）。
 
-灌完后**重启 app**（布隆过滤器启动时预热）、重新生成 token，压测时加 `--prop SHOP_MAX=100000`。
+灌完后**重启 app**（布隆过滤器启动时预热；不重启也会在 1 分钟内由定时增量同步补上）、重新生成 token，压测时加 `--prop SHOP_MAX=100000`。
 MySQL 默认的 `innodb_buffer_pool_size` 只有 128M，放不下这些数据；`--buffer-pool-gb` 的修改重启后失效，
 正式压测要把它写进 MySQL 启动参数，否则测的是磁盘而不是数据库。
 
-> `RedisBloomFilter` 的容量按 1 万家店铺设计（`EXPECTED_INSERTIONS = 10_000`），10 万家店铺时位图几乎写满，
-> 对不存在的 id 基本不再拦截。不影响压测存在的店铺，但上线到这个规模前要调大容量。
+> `RedisBloomFilter` 的设计容量默认 100 万家店铺（`BLOOM_EXPECTED_INSERTIONS`），启动日志会打印填充率和估算误判率，
+> 店铺数超过设计容量时告警。灌数后可以用 `python perf/baseline/bloom_check.py --shops 100000` 检查：
+> 存在的店铺全部放行、不存在的 id 误判率低于 2%。
 
 ## 第 1 步：组件单测
 

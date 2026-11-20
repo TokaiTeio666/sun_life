@@ -88,6 +88,13 @@ hmdp:
   # 压测开关：false 时商铺详情跳过布隆过滤器与缓存，直接查库（用于 A/B 对比）
   cache:
     enabled: true
+  # 商铺布隆过滤器。位图大小约 expected-insertions × 9.6 位（100 万 ≈ 1.2MB）；实际商铺数超过设计容量后误判率快速上升。
+  # 改这两个值会换一个新的位图 key（bloom:shop:{位数}:{哈希数}）并在启动时重新预热，旧 key 1 天后过期
+  bloom:
+    expected-insertions: ${BLOOM_EXPECTED_INSERTIONS:1000000}
+    fpp: 0.01
+    # 增量同步间隔：补上不经过本副本写入的新商铺，并检查位图是否丢失
+    sync-interval-ms: 60000
   kafka:
     # 秒杀主题分区数（只能增不能减）；整个消费组的最大并行度 = 分区数
     seckill-partitions: 12
