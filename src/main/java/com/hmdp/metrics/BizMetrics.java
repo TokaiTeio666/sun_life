@@ -43,6 +43,21 @@ public class BizMetrics {
         }
     }
 
+    /** 过载保护拒绝请求的原因 */
+    public enum OverloadReason {
+        /** 回源 DB 并发闸没有许可，立即拒绝 */
+        DB_GATE("db_gate"),
+        /** 等 DB 连接超时（Hikari connection-timeout） */
+        DB_CONN_TIMEOUT("db_conn_timeout");
+
+        private final String tag;
+
+        OverloadReason(String tag) {
+            this.tag = tag;
+        }
+    }
+
+    private final Map<OverloadReason, Counter> overloadRejected = new EnumMap<>(OverloadReason.class);
     private final Map<SeckillResult, Counter> seckillRequests = new EnumMap<>(SeckillResult.class);
     private final Counter sendFailureRollbackOk;
     private final Counter sendFailureRollbackFailed;
@@ -61,6 +76,12 @@ public class BizMetrics {
             seckillRequests.put(r, Counter.builder("hmdp.seckill.requests")
                     .description("秒杀请求按 Lua 结果计数：成功 / 售罄 / 重复下单 / 未开始 / 已结束")
                     .tag("result", r.tag)
+                    .register(registry));
+        }
+        for (OverloadReason r : OverloadReason.values()) {
+            overloadRejected.put(r, Counter.builder("hmdp.overload.rejected")
+                    .description("过载保护返回 503 的请求数（reason=db_gate 并发闸拒绝；db_conn_timeout 等 DB 连接超时）")
+                    .tag("reason", r.tag)
                     .register(registry));
         }
         sendFailureRollbackOk = Counter.builder("hmdp.seckill.send.failures")
@@ -91,6 +112,10 @@ public class BizMetrics {
                 .description("每条库存 UPDATE 合并的订单数（批量落库聚合度；count 即热点行 UPDATE 次数）")
                 .serviceLevelObjectives(1, 5, 10, 25, 50, 100, 200)
                 .register(registry);
+    }
+
+    public void overloadRejected(OverloadReason reason) {
+        overloadRejected.get(reason).increment();
     }
 
     public void seckillRequest(int luaCode) {

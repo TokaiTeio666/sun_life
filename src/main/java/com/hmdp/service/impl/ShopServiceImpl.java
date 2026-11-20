@@ -11,6 +11,7 @@ import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.utils.CacheClient;
+import com.hmdp.utils.DbGate;
 import com.hmdp.utils.RedisBloomFilter;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisData;
@@ -56,6 +57,9 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     private RedisBloomFilter bloomFilter;
 
+    @Resource
+    private DbGate dbGate;
+
     /** 压测开关：false 时跳过布隆过滤器与缓存，直接查库，用于对比缓存前后 P99 */
     @Value("${hmdp.cache.enabled:true}")
     private boolean cacheEnabled;
@@ -63,7 +67,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Override
     public Result queryById(Long id) {
         if (!cacheEnabled) {
-            Shop fromDb = getById(id);
+            // 直查 DB 同样经过并发闸：关缓存压测时这里就是全部的回源流量
+            Shop fromDb = dbGate.call(() -> getById(id));
             return fromDb == null ? Result.fail("店铺不存在！") : Result.ok(fromDb);
         }
 

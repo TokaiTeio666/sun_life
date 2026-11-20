@@ -66,6 +66,8 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | `hmdp_order_timeout_closed_total` | counter | 超时关单数 |
 | `hmdp_seckill_stock{voucher,source}` | gauge | 每 15s 采样的 Redis / DB 库存 |
 | `hmdp_seckill_stock_gap{voucher}` | gauge | **DB 库存 − Redis 库存**。Redis 先扣、DB 后扣，正常 ≥ 0 且等于在途订单数，lag 清零后归零 |
+| `hmdp_overload_rejected_total{reason}` | counter | 过载保护返回 503 的请求数：`db_gate` 并发闸拒绝、`db_conn_timeout` 等 DB 连接超时 |
+| `hmdp_db_gate_active` / `hmdp_db_gate_permits` | gauge | 并发闸内正在回源 DB 的请求数 / 许可数（0 = 闸已关闭） |
 
 > 命名约定：不要以 `created` 结尾（OpenMetrics 保留后缀，会被丢弃）；DistributionSummary 不设 `baseUnit`（会被拼进指标名）。
 > 标签只用有限枚举值，不放 userId / orderId。
@@ -97,6 +99,7 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | HighErrorRate | P1 | RED 面板定位接口 → 日志 / SkyWalking | 下游故障按对应存储告警处理；发布引起的直接回滚 |
 | HighP99Latency | P1 | 同时段 Hikari pending、Redis CPU、MySQL 行锁 | 找到先饱和的组件；临时手段：扩副本、网关限流 |
 | HikariPoolPending | P1 | MySQL 慢查询 / 行锁、Hikari 获取耗时 | DB 慢就先查 SQL；DB 不慢而池小，按 `副本数 × 池 < max_connections` 调 `DB_POOL_MAX` |
+| OverloadShedding | P1 | `reason` 标签、MySQL 慢查询、缓存命中率 | `db_gate`：回源并发超过许可数，先查 DB 为什么慢 / 缓存为什么没命中；`db_conn_timeout`：没走并发闸的接口在等连接。确认是容量不足再扩副本或调 `DB_GATE_PERMITS` |
 | TomcatThreadsSaturated | P2 | 在途请求 vs 线程面板 | 线程都在等下游 → 修下游；确实是 CPU 不够 → 扩副本 |
 | JvmHeapHigh | P2 | GC 面板、堆走势 | 持续上涨疑似泄漏，dump 分析；平稳偏高则调 `-Xmx` |
 | **SeckillOversellRisk** | P0 | 库存面板、`tb_voucher_order` 计数 | DB 比 Redis 扣得多：暂停该券（改 `end_time`），对账后修正 Redis 库存 |

@@ -153,13 +153,72 @@ SkyWalking 能看到 `/shop/{id}` 等请求的 Redis / MySQL 子调用。
 
 | # | 事项 | 依据 | 涉及代码 | 状态 |
 | --- | --- | --- | --- | --- |
-| B1 | 布隆过滤器检查从 7 次逐个 GETBIT 改为一次往返（pipeline 或 Lua） | SkyWalking 实测：`/shop/{id}` 每次 7 × GETBIT + 1 × GET | `utils/RedisBloomFilter`、`ShopServiceImpl` | ⏳ |
+| B1 | 布隆过滤器检查从 7 次逐个 GETBIT 改为一次往返（pipeline 或 Lua） | SkyWalking 实测：`/shop/{id}` 每次 7 × GETBIT + 1 × GET | `utils/RedisBloomFilter`、`ShopServiceImpl` | ✅ 2026-11-20，改为一条 `BITFIELD`（见 3-1.7） |
 | B2 | 秒杀售罄本地标记：Lua 返回库存不足后实例内记 `soldOut[voucherId]`，后续请求直接返回；超时关单回补库存时广播清除 | 单券 Lua 是单 key 热点，加 Redis 节点无效 | `VoucherOrderServiceImpl`、`OrderTimeoutScheduler` | ⏳ |
 
 每项完成后用同样的参数重跑 A2，把前后对比写进报告；`hmdp.cache.*` 之类的功能开关按 3-3.5 预留。
 
 **C. 排序待定**：批次 B 其余项（多级缓存、登录态本地缓存、点赞异步化、Feed 推拉结合、Sentinel、线程池隔离）以及批次 C / D，
 等 A6 确定优先级后再排。
+
+---
+
+### 3-1.7 调整：基线实测暂缓，先做不依赖基线的改造（2026-11-20）
+
+**决定**：A 组的基线实测先放一放（本机缺 JMeter / JDK，且同机测不出可信的扩展效率；分机环境见
+[../docs/bench-deploy.md](../docs/bench-deploy.md)，待租机器后执行）。在此期间只做**不看数据也能确定**的改造，
+读写分离、分库分表、库存分段、Redis Cluster 等高成本项仍然等基线数据。
+
+**与 3-1.6 的偏差**：3-1.6 要求「动手前先完成 A2，留下改造前数据」。现在没有改造前基线，用两条措施弥补：
+
+1. 每项改造都带功能开关（环境变量），补测时可以逐项关掉，在同一环境里测出改造前后的差值；
+2. 每项完成时记录不依赖压测环境的指标：每请求的 Redis 命令数（`redis-cli info commandstats` 前后相减）、
+   每请求的 SQL 条数、功能回归结果。吞吐类数字只在同机做开 / 关对比，标注「同机，不作基线」。
+
+#### 已完成（2026-11-20）
+
+| 事项 | 结果 | 提交 |
+| --- | --- | --- |
+| 压测造数 `perf/baseline/seed_data.py`：100 万用户 / 10 万店铺 / 1000 万订单，含券、笔记、关注、Redis 店铺坐标与收件箱 | 一次性容器内全量跑通，数据 + 索引约 3.1 GB | `95a0348`、`d131aee` |
+| 分机部署：中间件地址、Kafka 对外监听器、JVM 参数、MySQL 容量参数可配置；应用机覆盖文件；`bench.env.example` | compose 配置与 Kafka 双监听器已验证；**未在真实多机环境启动过** | 同上 |
+| B1 布隆过滤器改为一条 `BITFIELD` | `/shop/{id}` 每请求 Redis 命令 8 → 2；与旧位图兼容 | `dc70094` |
+| JDK 21 + 虚拟线程（只切换 Tomcat 请求线程，开关 `VIRTUAL_THREADS`）；MySQL 驱动 9.1.0 | 同机 2 核 200 并发：走缓存约 1.5k → 6k QPS，直查 MySQL 约 0.9k → 4.5k QPS（不作基线） | `dc70094` |
+
+虚拟线程带来的两个后续影响，下面 E1 处理：Tomcat 不再有 200 线程的上限，过载时请求全部堆到 Hikari 连接池上；
+`tomcat_threads_*` 指标失效，应用饱和改看 `hikaricp_connections_pending` 与接口 P99。
+
+#### 待做：第一组，规模上来必然出问题的（按顺序执行）
+
+| # | 事项 | 现状与问题 | 做法 | 涉及代码 | 开关 | 验证 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E1 | **过载保护** | 等 DB 连接最长 3s（`connection-timeout: 3000`）；虚拟线程下并发不受限，过载时大量请求一起等 3s 再失败，拖垮全部接口 | ① 等连接超时降到 800ms；② 回源 DB 的入口加并发闸（信号量，默认 = 连接池大小 × 2），拿不到许可立即返回「系统繁忙」；③ `WebExceptionAdvice` 把获取连接超时映射为同样的繁忙响应（HTTP 503），不再当作 500 | `application.yaml`、`config/WebExceptionAdvice`、`utils/CacheClient`（回源处）、新增 `utils/DbGate` | `DB_GATE_PERMITS=0` 关闭并发闸；`DB_CONN_TIMEOUT_MS` | 关缓存压 `/shop/{id}`：过载时 P99 不超过约 1s，失败请求返回 503 而不是超时；正常流量错误率不变 | ✅ 2026-11-20。同机过载对比：全部请求 P99 3202ms → 103ms，成功请求平均耗时约 2.6s → 0.12s；每请求 Redis 命令数 / SQL 条数不变。数据与范围说明见 [behavior-changes.md](../docs/behavior-changes.md) 1.6 |
+| E2 | **布隆过滤器容量** | `EXPECTED_INSERTIONS = 10_000` 写死；10 万家店时位图几乎写满，对不存在的 id 基本不拦截。启动预热把全部 id 放进一个 pipeline | ① 容量与误判率改为配置（`hmdp.bloom.expected-insertions`，默认 100 万）；② key 带上位图长度（`bloom:shop:{numBits}`），容量变化时写入新 key，旧 key 设 1 天过期，滚动发布期间新旧副本各用各的；③ 预热分批（每批 1000 个 id）并按 id 游标分页读库；④ 启动日志打印实际填充率，超过设计值告警 | `utils/RedisBloomFilter`、`config/BloomFilterInitializer`、`application.yaml` | 已有 `HMDP_CACHE_ENABLED` | 造数 10 万店后：存在的 id 全部通过；随机 10 万个不存在的 id 误判率 < 2% | ⏳ |
+| E3 | **大 V 发笔记的推送** | `BlogServiceImpl.saveBlog` 在请求线程里同步查出全部粉丝并 pipeline 推送；造数中 1 号创作者约 6 万粉丝，一次发帖约 12 万条 Redis 命令，期间占着请求和 Redis 连接 | ① 发帖只落库并发一条 Kafka 消息（新 topic `blog.published`，key = 作者 id）；② 消费者按粉丝 id 游标分页（每页 1000）查粉丝、分批 pipeline 推送；③ 推拉结合：粉丝数超过阈值（默认 5000）的作者不推送，只写自己的发件箱 `outbox:{userId}`，粉丝读 Feed 时合并收件箱与所关注大 V 的发件箱（对应批次 B「Feed 推拉结合」） | `service/impl/BlogServiceImpl`、`mq/` 新增消费者、`config/KafkaConfig`、`utils/RedisConstants` | `FEED_ASYNC_PUSH=false` 回到同步推送；`FEED_BIGV_THRESHOLD` | 6 万粉丝的作者发帖：接口耗时与粉丝数无关；普通作者的粉丝数秒内可见；大 V 的笔记出现在粉丝 Feed 且时间线顺序正确 | ⏳ |
+
+#### 待做：第二组，减少每个请求的 IO（E1–E3 之后）
+
+| # | 事项 | 现状 | 做法 | 涉及代码 | 开关 | 验证 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| E4 | **登录态本地短缓存** | 每个带 token 的请求一次 `HGETALL` | Caffeine 缓存 token → 用户，TTL 10–30s、容量上限；退出登录时删本机缓存并通过 Redis Pub/Sub 广播其他副本删除；续期逻辑保持「距上次续期超过 30 分钟才写 Redis」 | `utils/RefreshInterceptor`、`controller/UserController`（退出）、`pom.xml`（caffeine） | `LOGIN_LOCAL_CACHE_SECONDS=0` 关闭 | 带 token 连续请求：`hgetall` 次数 ≈ 用户数 ÷ TTL，而不是请求数；退出后其他副本在 TTL 内失效 | ⏳ |
+| E5 | **多级缓存** | 店铺详情、商铺类型、热门笔记每次读 Redis | Caffeine + Redis：本地 TTL 5–30s、容量上限；更新店铺时删 Redis 并广播删本地（复用 E4 的广播通道） | `utils/CacheClient`、`service/impl/ShopServiceImpl`、`ShopTypeServiceImpl`、`BlogServiceImpl` | `LOCAL_CACHE_ENABLED=false` | 热点店铺请求的 Redis 命令数趋近 0；更新店铺后各副本在秒级内读到新值 | ⏳ |
+| E6 | **秒杀售罄本地标记**（原 B2） | 售罄后请求照样执行 Lua | Lua 返回库存不足后在实例内记 `soldOut[voucherId]`，后续直接返回；超时关单回补库存时广播清除；标记带短 TTL 兜底 | `VoucherOrderServiceImpl`、`OrderTimeoutScheduler` | `SECKILL_SOLDOUT_FLAG=false` | 售罄后 `evalsha` 次数不再增长；关单回补后能继续抢到 | ⏳ |
+| E7 | **订单号本地生成** | 每单一次 Redis `INCR`（`RedisIdWorker`） | 雪花算法：时间戳 + 机器号 + 序列；机器号启动时从 Redis 抢占并续约（对应批次 C「全局 ID」） | `utils/RedisIdWorker`、`VoucherOrderServiceImpl` | 保留旧实现，配置切换 | 多副本并发生成无重复；秒杀每请求 Redis 命令数少 1 | ⏳ |
+| E8 | **点赞数异步回写** | 每次点赞更新一次 `tb_blog` 行 | Redis 计数 + 脏集合，定时批量写回 DB（对应批次 B「点赞数异步化」） | `BlogServiceImpl`、新增定时任务 | `LIKE_ASYNC_FLUSH=false` | 点赞接口不再产生 UPDATE；定时回写后 DB 点赞数与 Redis 一致 | ⏳ |
+
+#### 仍然等基线数据的
+
+- 批次 C：Outbox 防丢单、Kafka 3 节点、MySQL 主从与读写分离、延迟队列关单。其中 Outbox 和高可用属于「确定要做」，
+  但涉及部署形态，和读写分离一起排；
+- 批次 D：Redis Cluster、秒杀库存分段、订单分库分表、Canal 缓存一致性；
+- 批次 B 剩余项：热 key 探测、Sentinel 限流熔断、线程池隔离（E1 的并发闸是其简化版，接入 Sentinel 后可替换）。
+
+#### 执行约定
+
+- 顺序：E1 → E2 → E3，然后 E4 → E5 → E6 → E7 → E8；每项单独提交，提交信息写明开关名；
+- 每项完成后在本表更新状态，并把「每请求 Redis 命令数 / SQL 条数」的前后值记到
+  [../docs/capacity-baseline-report.md](../docs/capacity-baseline-report.md) 第 5 节和 `perf/baseline/capacity-model.example.json`；
+- 行为变化（例如过载时返回 503、Feed 对大 V 改为拉取）同步写进 [../docs/behavior-changes.md](../docs/behavior-changes.md)；
+- 补测基线时，先在全部开关关闭的状态下测一轮作为「改造前」，再逐项打开。
 
 ---
 

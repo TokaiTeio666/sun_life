@@ -53,6 +53,15 @@ groups:
           summary: "{{ $labels.instance }} 有线程在等 DB 连接"
           description: "连接池已打满：DB 变慢，或 DB_POOL_MAX 偏小。先看 MySQL 慢查询与行锁等待。"
 
+      # 过载保护在丢请求（返回 503）：reason=db_gate 并发闸拒绝，db_conn_timeout 等连接超时
+      - alert: OverloadShedding
+        expr: sum by (instance, reason) (rate(hmdp_overload_rejected_total{job="hmdp-app"}[1m])) > 0
+        for: 1m
+        labels: {severity: P1}
+        annotations:
+          summary: "{{ $labels.instance }} 正在因过载拒绝请求（{{ $labels.reason }}，{{ $value | humanize }}/s）"
+          description: "回源 DB 的并发超过上限。先看 MySQL 是否变慢、缓存是否大面积失效；确认是容量不足再扩副本或调 DB_GATE_PERMITS。"
+
       # 只在关闭虚拟线程（VIRTUAL_THREADS=false）时有意义：虚拟线程下 Tomcat 没有线程池，
       # 这几个指标恒为 -1，用 > 0 过滤掉，否则 -1 / -1 = 1 会误报。
       # 虚拟线程下的饱和信号看上面的 HikariPending 和接口 P99。

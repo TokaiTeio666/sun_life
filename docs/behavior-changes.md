@@ -59,6 +59,29 @@
 缓存策略从“仅防穿透”改为“互斥锁防击穿 + 空值缓存 + 布隆过滤器”。热点 key 过期时只有一个请求回源 DB，
 其他请求最多等待约 1s（20 × 50ms），超时直接回源。返回值不变。
 
+### 1.6 过载时返回 503（2026-11-20，阶段 3 的 E1）
+
+| 场景 | 之前 | 之后 |
+| --- | --- | --- |
+| 回源 DB 的并发超过上限（`GET /shop/{id}` 缓存未命中，或关缓存直查） | 在连接池上排队，最长等 3s | 立即返回 HTTP `503`，`Retry-After: 1`，`{"success":false,"errorMsg":"系统繁忙，请稍后再试"}` |
+| 任意接口等 DB 连接超时 | 等 3s 后返回 HTTP `200` + `服务器异常`，并打印堆栈 | 等 800ms 后返回同样的 `503`，不打印堆栈，计入 `hmdp_overload_rejected_total` |
+
+- 上限（并发闸许可数）默认 = `DB_POOL_MAX × 2`，`DB_GATE_PERMITS` 指定，`0` 关闭；等连接超时由 `DB_CONN_TIMEOUT_MS` 指定（默认 800）。
+  回到改造前的行为：`DB_GATE_PERMITS=0` + `DB_CONN_TIMEOUT_MS=3000`（503 的映射没有开关）。
+- 并发闸只覆盖经 `CacheClient` 回源和商铺详情的直查；其他接口过载时走第二行（等 800ms）。
+- 调用方需要把 503 当作可重试的失败。nginx 的 `proxy_next_upstream` 只对 `error timeout` 重试，不会把 503 转给其他副本放大流量。
+- Kafka 消费者和定时任务共用连接池，等连接的超时同样变成 800ms；它们不经过并发闸，超时后走原有的重试 / 死信流程。
+
+本机验证（1 个副本，`DB_POOL_MAX=4`，MySQL 限到 0.05 核模拟变慢，300 并发压关缓存的 `/shop/1` 20s；同机，不作基线）：
+
+| 配置 | 全部请求 P50 / P99 | 成功请求平均耗时 | 成功 /s | 503 的平均耗时 |
+| --- | --- | --- | --- | --- |
+| 改造前：超时 3000ms，无并发闸 | 3000 / 3202 ms | 约 2.6 s | 约 70 | 约 3.0 s |
+| 只降超时：800ms，无并发闸 | 803 / 998 ms | 约 0.74 s | 约 82 | 约 0.8 s |
+| 默认：800ms + 并发闸（许可 8） | 22 / 103 ms | 约 0.12 s | 约 68 | 小于 1 ms |
+
+MySQL 不限速、4 并发时 2 万次请求 0 失败；默认配置（连接池 30、许可 60）走缓存 50 并发 2 万次请求 0 失败、0 次拒绝。
+
 ## 2. Redis key 变化
 
 | key | 类型 | 说明 |
@@ -78,7 +101,8 @@
 | 配置 | 之前 | 之后 |
 | --- | --- | --- |
 | `spring.datasource.url` | `serverTimezone=UTC` | `serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true` |
-| `spring.datasource.hikari.maximum-pool-size` | 默认 10 | `${DB_POOL_MAX:30}`，`minimum-idle: 10`，`connection-timeout: 3000` |
+| `spring.datasource.hikari.maximum-pool-size` | 默认 10 | `${DB_POOL_MAX:30}`，`minimum-idle: 10`，`connection-timeout: 3000`（之后改为 `${DB_CONN_TIMEOUT_MS:800}`，见 1.6） |
+| `hmdp.db-gate.permits` | 无 | `${DB_GATE_PERMITS:-1}`（负数 = 连接池 × 2，0 = 关闭） |
 | `spring.data.redis.lettuce.pool.max-active` | 10 | 50（`max-wait: 2000ms`，`timeout: 2000ms`） |
 | `server.tomcat.*` | 默认 | `threads.max: 200`，`accept-count: 500`，`max-connections: 8192` |
 | `spring.servlet.multipart` | 默认 | `max-file-size: 5MB`，`max-request-size: 10MB` |
