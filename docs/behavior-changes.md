@@ -219,6 +219,40 @@ MySQL 不限速、4 并发时 2 万次请求 0 失败；默认配置（连接池
 DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`ORDER_ID_MODE=redis` 时 500 单 500 次）。
 手工删除一个副本的租约：下一次续约时发现并重新抢到新机器号。停机后租约立即释放。
 
+### 1.13 点赞数异步回写（2026-11-20，阶段 3 的 E8）
+
+| | 之前 | 之后 |
+| --- | --- | --- |
+| 点赞接口 | 每次点赞/取消同步 `UPDATE tb_blog SET liked = liked ± 1` | 只写 Redis：Lua 切换位图，并把 ±1 累加到 `blog:like:delta` |
+| 写库 | 请求线程内完成 | `LikeCountFlusher` 每 5s 批量回写，同一篇笔记的多次点赞合并成一条 `UPDATE` |
+| 笔记存在性 | 由 `UPDATE` 的影响行数判断 | 本地 Caffeine 缓存「已确认存在」的 id（10 分钟、上限 20 万），未命中才查一次主键 |
+
+- 开关：`LIKE_ASYNC_FLUSH=false` 回到同步写库。开关关闭后 `LikeCountFlusher` 仍会运行（把之前累积的增量写完）；
+  没有增量时每轮只多一次 Redis `EXISTS`。
+- 回写不丢：先把 `blog:like:delta` 原子改名为 `blog:like:delta:flushing`，写库成功后才删除；写库失败则保留，下一轮先重试这一批。
+  整批在一个事务里执行，不会只写一半。
+- 最多一次重复：写库事务已提交、删除 `flushing` 之前进程被杀时，这一批会在下一轮再加一遍（至少一次语义）。
+  窗口只有一次 `DEL` 的时间；点赞数不是账，接受这个误差。
+- **可见性延迟**：`tb_blog.liked` 最多滞后一个回写周期（默认 5s，`hmdp.like.flush-interval-ms`）。
+  依赖该列的「热门笔记」排序和笔记详情里的点赞数最多 5s 后更新；点赞状态本身（`isLike`）仍由位图实时判断，不受影响。
+- 取消点赞多于点赞时，`liked` 最低减到 0（SQL 为 `GREATEST(CAST(liked AS SIGNED) + ?, 0)`），无符号列不会下溢报错。
+- 点赞又取消（净 0）时，增量字段由 Lua 的 `HDEL` 删除，不会产生一次空写库。
+- 多副本：`LikeCountFlusher` 用 Redisson 锁 `lock:job:like-flush` 保证同一时刻只有一个副本回写。
+- 指标：`hmdp_like_flushed_rows_total`（每轮回写更新的行数）、`hmdp_like_flush_failures_total`（失败的轮数）。
+
+本机验证（2026-11-21，MySQL + Redis 本地，单副本）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 点赞 | 立即 `HGET blog:like:delta` = 1、位图 = 1、DB 未变；≤5s 后 DB +1，`delta` / `flushing` 清空；指标 `flushed_rows` = 2、`failures` = 0 |
+| 取消点赞 | 增量 -1、位图 = 0、DB 立即仍是旧值，下一轮 flush 后回到原值 |
+| 不存在的笔记 | 返回「笔记不存在！」，Redis 不产生增量 |
+| 点赞后立刻取消（净 0） | 增量字段被删除，DB 不变 |
+| 10 个用户并发点赞同一篇笔记 | 期间已回写 4 + 残留 6 = 10，最终 DB 正好 +10，无丢失 |
+| `LIKE_ASYNC_FLUSH=false` | 点赞后 DB 立即 +1，`blog:like:delta` 不存在；取消后 DB 立即回退 |
+
+未验证：写库中途失败的重试路径、提交后删除前进程被杀（均为代码审查）；多副本锁竞争为单实例实测。
+
 ## 2. Redis key 变化
 
 | key | 类型 | 说明 |
@@ -239,6 +273,9 @@ DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`OR
 | `idworker:lease:{0-1023}` | string，TTL 60s | 订单号机器号的租约，值是持有副本的随机标识（见 1.12） |
 | `idworker:floor:{0-1023}` | string，TTL 1 天 | 该机器号已用到的最大秒数，防止换实例后时钟回拨造成重复 |
 | `icr:order:{日期}` | string 计数 | 行为变化：默认不再使用，只在 `ORDER_ID_MODE=redis` 或租约丢失回退时递增 |
+| `blog:like:delta` | hash | 待回写的点赞数增量：field = 笔记 id，value = 尚未写回 `tb_blog.liked` 的增量（见 1.13） |
+| `blog:like:delta:flushing` | hash | 正在回写的那一批增量；写库成功后删除，失败则保留到下一轮重试 |
+| `lock:job:like-flush` | Redisson 锁 | 点赞数回写任务集群互斥 |
 
 ## 3. 配置变化（`application.yaml`）
 
@@ -253,6 +290,7 @@ DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`OR
 | `spring.kafka.consumer.properties.max.poll.interval.ms` | 默认 | 300000 |
 | `hmdp.kafka.seckill-partitions` | 无（硬编码 3） | 12 |
 | `hmdp.upload.dir` | 无 | `${HMDP_UPLOAD_DIR:./upload}` |
+| `hmdp.like.async-flush` / `hmdp.like.flush-interval-ms` | 无 | `${LIKE_ASYNC_FLUSH:true}` / 5000ms；false 回到每次点赞同步写库（见 1.13） |
 | `logging.level.com.hmdp` | debug | info；`application-dev.yaml` 中为 debug（`--spring.profiles.active=dev`） |
 
 ## 4. 数据库变化
@@ -294,6 +332,7 @@ docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/mig
 | 扩缩容 | 不支持 | `docker compose -f deploy/docker-compose.yml up -d --scale app=3`，随后 `restart frontend` |
 | 上传图片 | 写本机硬编码目录 | 共享卷 `hmdp-upload-data`：app 挂 `/data/upload/blogs`，nginx 挂 `/usr/share/nginx/upload/imgs/blogs`（只读）；nginx 先找镜像内示例图，再找上传卷 |
 | 超时关单 | 每个实例都执行 | Redisson 锁保证同一时刻只有一个实例执行 |
+| 点赞数回写 | 每个实例都执行 | `LIKE_ASYNC_FLUSH` 透传到 app 容器；回写任务由 Redisson 锁保证只有一个实例执行 |
 | Kafka 秒杀主题 | 3 分区 | 启动时自动扩到 12 分区（只能增不能减） |
 | nginx | 单上游、无长连接复用 | `upstream` + `keepalive 64`、`proxy_next_upstream`、gzip、静态资源 7 天缓存、`X-Real-IP` 透传 |
 

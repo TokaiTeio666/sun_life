@@ -145,7 +145,9 @@ sequenceDiagram
 - **点赞关系**：由 ZSet 改为 **BitMap**，`userId` 直接作为 bit offset，点赞/取消/判断都是 O(1)、每用户 1 bit；
 - **TopN 展示**：另保留一个 **有界 ZSet**（最多 1000 个用户）记录点赞时间，用于「点赞用户 Top5」，不会无限增长；
 - **日 UV**：笔记详情页按 `uv:blog:{id}:{yyyyMMdd}` 写入 HyperLogLog，固定约 12KB/键，35 天自动过期；
-  新增 `GET /blog/uv/{id}?date=yyyyMMdd` 查询。
+  新增 `GET /blog/uv/{id}?date=yyyyMMdd` 查询；
+- **点赞数异步回写**：点赞只写 Redis，±1 增量记在 `blog:like:delta`，`LikeCountFlusher` 每 5s 合并成一条 `UPDATE`
+  批量回写 `tb_blog.liked`；`LIKE_ASYNC_FLUSH=false` 回到同步写库（可见性最多延迟一个周期，见 `docs/behavior-changes.md` 1.13）。
 
 内存实测（10 万个用户，`MEMORY USAGE`）：
 
@@ -343,7 +345,8 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 | `utils/RedisBloomFilter.java` | Redis BitMap 布隆过滤器（双哈希、一条 BITFIELD 读写、容量可配置、key 带位图参数） |
 | `config/BloomFilterInitializer.java` | 启动时按 id 游标分批把商铺 id 预热进布隆过滤器，之后定时增量同步 |
 | `utils/CacheClient.java` | 空值缓存 + 互斥锁/逻辑过期 + TTL ±10% 抖动 |
-| `service/impl/BlogServiceImpl.java` | 点赞 BitMap（userId 作 offset）+ 有界 ZSet TopN + 日 UV HyperLogLog |
+| `service/impl/BlogServiceImpl.java` | 点赞 BitMap（userId 作 offset）+ 有界 ZSet TopN + 日 UV HyperLogLog + 点赞增量异步回写 |
+| `mq/LikeCountFlusher.java` | 点赞数定时批量回写 `tb_blog.liked`（改名取批、失败保留重试、Redisson 锁） |
 | `controller/BlogController.java` | 新增 `GET /blog/uv/{id}` 日 UV 查询 |
 | `pom.xml` / `application.yaml` / `deploy/Dockerfile` / `deploy/docker-compose.yml` | 升级 Java 21 / Spring Boot 3 / MySQL 8 / Redis 7，补齐 Boot 3 配置 |
 | `perf/gen_tokens.ps1` / `perf/bench-voucher.sql` / `perf/shop-detail-bench.jmx` | 无 Python 依赖的压测数据准备与缓存 A/B 脚本 |
