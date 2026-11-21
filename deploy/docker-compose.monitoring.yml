@@ -1,0 +1,113 @@
+# ========== sun_life 监控编排（阶段 3-1：监控体系） ==========
+# 与主编排叠加使用（路径相对于 deploy/ 目录）：
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml up -d --build
+# 资源指标（容器 CPU / 内存，需 Linux 或 WSL2 后端）：追加 --profile resources
+# 访问：Grafana http://localhost:3000（admin / ${GRAFANA_ADMIN_PASSWORD}）；Prometheus http://localhost:9090
+#
+# 抓取目标：
+#   app 各副本  app:9081/actuator/prometheus（Docker DNS 自动发现所有副本，扩缩容无需改配置）
+#   Redis       redis-exporter:9121
+#   MySQL       mysqld-exporter:9104
+#   Kafka       kafka-exporter:9308（消费组 lag、DLT 消息数）
+
+services:
+  prometheus:
+    restart: unless-stopped
+    image: prom/prometheus:v2.54.1
+    container_name: hmdp-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+      # 允许 curl -X POST /-/reload 热加载配置与告警规则
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    restart: unless-stopped
+    image: grafana/grafana:11.2.2
+    container_name: hmdp-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/hmdp-overview.json
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  redis-exporter:
+    restart: unless-stopped
+    image: oliver006/redis_exporter:v1.62.0
+    container_name: hmdp-redis-exporter
+    environment:
+      # 与 app 连接的是同一个地址（分机部署时由 APP_* 变量指向其他机器）
+      REDIS_ADDR: "redis://${APP_REDIS_HOST:-redis}:${APP_REDIS_PORT:-6379}"
+      # 大 key 监控：导出匹配 key 的元素个数（redis_key_size）。只列低基数前缀，
+      # 不要放 feed:* / follows:* 这类每用户一个的 key，否则时间序列数随用户量爆炸
+      REDIS_EXPORTER_CHECK_KEYS: "seckill:order:*"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  mysqld-exporter:
+    restart: unless-stopped
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: hmdp-mysqld-exporter
+    # 本地演示直接用 root；生产应建只读账号：
+    #   CREATE USER 'exporter'@'%' IDENTIFIED BY '...' WITH MAX_USER_CONNECTIONS 3;
+    #   GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
+    command:
+      - --mysqld.address=${APP_MYSQL_ADDR:-mysql:3306}
+      - --mysqld.username=root
+      - --collect.info_schema.innodb_metrics
+      - --collect.perf_schema.eventsstatements
+      - --collect.perf_schema.eventsstatements.limit=50
+    environment:
+      MYSQLD_EXPORTER_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  kafka-exporter:
+    restart: unless-stopped
+    image: danielqsj/kafka-exporter:v1.8.0
+    container_name: hmdp-kafka-exporter
+    command:
+      - --kafka.server=${APP_KAFKA_BOOTSTRAP:-kafka:9092}
+      - --topic.filter=^seckill\..*
+      - --group.filter=^seckill-.*
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # 容器级 CPU / 内存（各组件资源使用率）。Docker Desktop 下需 WSL2 后端，默认不启动
+  cadvisor:
+    profiles: ["resources"]
+    restart: unless-stopped
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: hmdp-cadvisor
+    privileged: true
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=10s
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+
+volumes:
+  prometheus-data:
+    name: hmdp-prometheus-data
+  grafana-data:
+    name: hmdp-grafana-data

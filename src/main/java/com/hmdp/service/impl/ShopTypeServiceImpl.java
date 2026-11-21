@@ -8,6 +8,7 @@ import com.hmdp.entity.ShopType;
 import com.hmdp.mapper.ShopTypeMapper;
 import com.hmdp.service.IShopTypeService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.utils.LocalCache;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
@@ -29,15 +30,24 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    private LocalCache localCache;
+
     @Override
     public Result queryTypeList() {
         String key = "shopTypeList";
+        //0. 第一级：本地短缓存（商铺类型几乎不变，首页每次打开都要读）
+        List<ShopType> local = localCache.get(key);
+        if (local != null) {
+            return Result.ok(local);
+        }
         //1. 从redis查询商城缓存
         String shopTypejson = stringRedisTemplate.opsForValue().get(key);
         //2. 判断是否存在
         if (StrUtil.isNotBlank(shopTypejson)) {
             //3. 存在，直接返回
             List<ShopType> shopTypeList = JSONUtil.toList(shopTypejson, ShopType.class);
+            localCache.put(key, shopTypeList);
             return Result.ok(shopTypeList);
         }
         //4. 不存在，根据id查询数据库
@@ -56,6 +66,7 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
                 TimeUnit.HOURS
                 );
 
+        localCache.put(key, shopTypeList);
         //7. 返回
         return Result.ok(shopTypeList);
     }

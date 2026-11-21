@@ -22,8 +22,12 @@ public class CacheClient {
 
     private final StringRedisTemplate stringRedisTemplate;
 
-    public CacheClient(StringRedisTemplate stringRedisTemplate) {
+    /** 请求线程上的回源查询都经过并发闸；后台的逻辑过期重建不经过（它自己有 4 线程的上限） */
+    private final DbGate dbGate;
+
+    public CacheClient(StringRedisTemplate stringRedisTemplate, DbGate dbGate) {
         this.stringRedisTemplate = stringRedisTemplate;
+        this.dbGate = dbGate;
     }
 
     public void set(String key, Object value, Long time, TimeUnit unit) {
@@ -81,7 +85,7 @@ public class CacheClient {
         }
 
         // 4. 不存在，根据 id 查询数据库
-        R r = dbFallback.apply(id);
+        R r = dbGate.call(() -> dbFallback.apply(id));
 
         // 5. 判断数据库中是否存在
         if (r == null) {
@@ -240,8 +244,8 @@ public class CacheClient {
                 if (StrUtil.isNotBlank(json)) {
                     return JSONUtil.toBean(json, type);
                 }
-                //4. 回源 DB 并写缓存（空值也缓存，防穿透）
-                R r = dbFallback.apply(id);
+                //4. 回源 DB 并写缓存（空值也缓存，防穿透）；并发闸满时抛 SystemBusyException，finally 里照常释放锁
+                R r = dbGate.call(() -> dbFallback.apply(id));
                 if (r == null) {
                     stringRedisTemplate.opsForValue().set(key, "",
                             jitteredSeconds(RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES), TimeUnit.SECONDS);
@@ -256,6 +260,6 @@ public class CacheClient {
         }
         //等锁超时（重建方异常或极慢）：直接回源，保证可用性
         log.warn("互斥锁等待超时，直接回源 key={}", key);
-        return dbFallback.apply(id);
+        return dbGate.call(() -> dbFallback.apply(id));
     }
 }

@@ -59,6 +59,200 @@
 缓存策略从“仅防穿透”改为“互斥锁防击穿 + 空值缓存 + 布隆过滤器”。热点 key 过期时只有一个请求回源 DB，
 其他请求最多等待约 1s（20 × 50ms），超时直接回源。返回值不变。
 
+### 1.6 过载时返回 503（2026-11-20，阶段 3 的 E1）
+
+| 场景 | 之前 | 之后 |
+| --- | --- | --- |
+| 回源 DB 的并发超过上限（`GET /shop/{id}` 缓存未命中，或关缓存直查） | 在连接池上排队，最长等 3s | 立即返回 HTTP `503`，`Retry-After: 1`，`{"success":false,"errorMsg":"系统繁忙，请稍后再试"}` |
+| 任意接口等 DB 连接超时 | 等 3s 后返回 HTTP `200` + `服务器异常`，并打印堆栈 | 等 800ms 后返回同样的 `503`，不打印堆栈，计入 `hmdp_overload_rejected_total` |
+
+- 上限（并发闸许可数）默认 = `DB_POOL_MAX × 2`，`DB_GATE_PERMITS` 指定，`0` 关闭；等连接超时由 `DB_CONN_TIMEOUT_MS` 指定（默认 800）。
+  回到改造前的行为：`DB_GATE_PERMITS=0` + `DB_CONN_TIMEOUT_MS=3000`（503 的映射没有开关）。
+- 并发闸只覆盖经 `CacheClient` 回源和商铺详情的直查；其他接口过载时走第二行（等 800ms）。
+- 调用方需要把 503 当作可重试的失败。nginx 的 `proxy_next_upstream` 只对 `error timeout` 重试，不会把 503 转给其他副本放大流量。
+- Kafka 消费者和定时任务共用连接池，等连接的超时同样变成 800ms；它们不经过并发闸，超时后走原有的重试 / 死信流程。
+
+本机验证（1 个副本，`DB_POOL_MAX=4`，MySQL 限到 0.05 核模拟变慢，300 并发压关缓存的 `/shop/1` 20s；同机，不作基线）：
+
+| 配置 | 全部请求 P50 / P99 | 成功请求平均耗时 | 成功 /s | 503 的平均耗时 |
+| --- | --- | --- | --- | --- |
+| 改造前：超时 3000ms，无并发闸 | 3000 / 3202 ms | 约 2.6 s | 约 70 | 约 3.0 s |
+| 只降超时：800ms，无并发闸 | 803 / 998 ms | 约 0.74 s | 约 82 | 约 0.8 s |
+| 默认：800ms + 并发闸（许可 8） | 22 / 103 ms | 约 0.12 s | 约 68 | 小于 1 ms |
+
+MySQL 不限速、4 并发时 2 万次请求 0 失败；默认配置（连接池 30、许可 60）走缓存 50 并发 2 万次请求 0 失败、0 次拒绝。
+
+### 1.7 商铺布隆过滤器容量（2026-11-20，阶段 3 的 E2）
+
+| 场景 | 之前 | 之后 |
+| --- | --- | --- |
+| 设计容量 | 写死 1 万家；10 万家店时位图写满 99%，不存在的 id 有 95.9% 穿过过滤器 | 默认 100 万家（`BLOOM_EXPECTED_INSERTIONS`），位图约 1.2MB；10 万家店时填充率 5.14% |
+| Redis key | `bloom:shop` | `bloom:shop:{位数}:{哈希数}`（默认 `bloom:shop:9585058:7`）；改容量后换新 key，其他 key（含 `bloom:shop`）24 小时后过期 |
+| 启动预热 | 一次读出全部 id，一个 pipeline 写入 | 按 id 游标每页 1000 个，每页一个 pipeline；完成后日志打印填充率与估算误判率，店铺数超过设计容量时 WARN |
+| 预热完成前的请求 | 位图为空时所有店铺都返回「店铺不存在」 | 过滤器未就绪时一律放行（空值缓存兜底） |
+| 不经过应用写入的新店铺（造数脚本、旧版本副本新增） | 重启 app 前一直返回「店铺不存在」 | 定时增量同步（`hmdp.bloom.sync-interval-ms`，默认 60s）补进过滤器 |
+| 位图被淘汰 / 清库 | 重启 app 前所有店铺返回「店铺不存在」 | 下一轮同步（最长 60s）发现后整体重建；重建完成前仍会误拒 |
+
+- 没有单独的开关：`HMDP_CACHE_ENABLED=false` 时整条缓存链路（含过滤器）不参与请求。回退到旧容量可设
+  `BLOOM_EXPECTED_INSERTIONS=10000`（key 为 `bloom:shop:95850:7`，不是旧的 `bloom:shop`）。
+- 滚动发布：未升级的副本继续读写 `bloom:shop`，新副本用新 key。旧 key 在第一个新副本启动 24 小时后过期，
+  **发布要在 24 小时内完成**，否则仍在运行的旧版本副本会把所有店铺判为不存在。
+- 哈希函数没有变。按这套哈希离线模拟到设计容量（100 万个连续 id）：填充率 41.6%，不存在的 id 误判率 0.37%–0.50%。
+
+本机验证（10 万家店，`python perf/baseline/bloom_check.py --shops 100000`）：10 万个存在的 id 全部放行；
+10 万个不存在的随机 id 穿过过滤器 0 个（改造前抽样 2 万个，穿过 19183 个）。直接往库里插入一家店约 1 分钟后可访问；
+删除位图后约 1 分钟自动重建；容量改为 5 万再改回，新旧 key 的过期时间按上表切换，超容量告警正常。
+每请求的 Redis 命令数不变（存在的 id 仍是 1 × BITFIELD + 1 × GET）。
+
+### 1.8 关注 Feed：异步推送与推拉结合（2026-11-20，阶段 3 的 E3）
+
+| 场景 | 之前 | 之后 |
+| --- | --- | --- |
+| `POST /blog` | 请求线程里查出全部粉丝并逐个推送，耗时随粉丝数增长 | 落库 + 写作者发件箱（2 条 Redis 命令）+ 发一条 Kafka 消息（`blog.published`，key = 作者 id）后返回 |
+| 普通作者的笔记 | 接口返回时粉丝已能看到 | 消费者按粉丝 id 游标分页（每页 1000）推送到收件箱，粉丝在消息消费后可见（本机约 0.1s） |
+| 粉丝数超过阈值（默认 5000）的作者 | 同上，全部推送 | 不推送：作者记入 `feed:bigv`，粉丝读 Feed 时从作者的发件箱拉取 |
+| `GET /blog/of/follow` | 只读自己的收件箱 | 收件箱 + 所关注大 V 的发件箱，按时间合并、按笔记 id 去重；同一毫秒的多条按笔记 id 倒序 |
+| `GET /blog/of/follow` 返回的 `offset` | `minTime == max ? os : os + offset`（写反了，第 3 页起会漏掉笔记） | 等于「已返回的、时间等于 `minTime` 的条数」；入参与返回结构不变 |
+| 新关注一个大 V | 只能看到关注之后的新笔记 | 立即能看到该大 V 发件箱里的历史笔记（最近 1000 条）；取关后立即看不到 |
+
+- 开关：`FEED_ASYNC_PUSH=false` 回到在请求线程里同步推送给全部粉丝（不写发件箱，不新增大 V）；
+  `FEED_BIGV_THRESHOLD` 调整大 V 阈值，`<= 0` 表示不区分大 V、全部异步推送。读取时的合并没有开关：`feed:bigv` 为空时等价于只读收件箱。
+- 发件箱对**所有**作者都写（原方案是只给大 V 写）：这样作者粉丝数越过阈值时不用回填历史笔记，之前推送过的笔记在收件箱和发件箱各有一份，读取时去重。
+- 大 V 标记只增不减：粉丝数回落也不会自动摘除，否则只存在于发件箱的笔记会从粉丝 Feed 里消失。需要摘除时手工 `SREM feed:bigv {userId}`。
+- 作者是否是大 V 在消费时判断（`SISMEMBER`，未命中时用 `LIMIT 1 OFFSET 阈值` 查一次 tb_follow），不在发帖请求里判断。
+- **会丢推送的情况**：笔记落库后 Kafka 消息发送失败，或消费重试 3 次仍失败——普通作者的粉丝收不到这一条（笔记本身不丢，大 V 的笔记不受影响）。
+  分别计入 `hmdp_feed_publish_failures_total`、`hmdp_feed_fanout_failures_total` 并打 ERROR 日志。要做到不丢需要本地消息表，归入批次 C 的 Outbox。
+- 关注集合 `follows:{userId}` 不在 Redis 里时（造数、被淘汰），读 Feed 会先从 DB 重建；一个人都没关注的用户每次读 Feed 都会多一次 DB 查询。
+- 新增消费组 `feed-fanout-group`（每副本 2 个消费线程，主题 3 分区）；它不受 `FEED_ASYNC_PUSH` 影响、始终运行。
+
+本机验证（造数：1 号作者 63193 粉丝，21 号作者 2888 粉丝；各发 3 条；同机，不作基线）：
+
+| | `FEED_ASYNC_PUSH=false`（改造前的行为） | 默认 |
+| --- | --- | --- |
+| 1 号（大 V）发帖耗时 | 2066–3555 ms | 26–47 ms（首次 161 ms） |
+| 21 号发帖耗时 | 79–93 ms | 22–36 ms |
+| 6 条笔记产生的 ZADD | 198243（另有等量的 ZREMRANGEBYRANK） | 8670 = 3 × 2888 + 6 条发件箱 |
+| 粉丝 Feed | 正确 | 只关注 21 号 / 只关注 1 号 / 两个都关注的粉丝各取一个：新帖齐全、无重复、时间倒序；12 条分 3 页翻完；同一毫秒 7 条时翻页无重复无遗漏 |
+
+每次读 Feed 的 Redis 命令：`ZREVRANGEBYSCORE` 1 条 → `EXISTS` + `SINTER` + `ZREVRANGEBYSCORE` ×（1 + 关注的大 V 数），两次往返（原来一次）。
+
+### 1.9 登录态本地短缓存（2026-11-20，阶段 3 的 E4）
+
+| 场景 | 之前 | 之后 |
+| --- | --- | --- |
+| 带 token 的请求 | 每次一条 `HGETALL login:token:{token}` | 副本内缓存 15s（Caffeine，上限 20 万条），同一 token 每个副本每 15s 最多一次 `HGETALL` |
+| `POST /user/logout` | 删 Redis key | 删 Redis key → 删本机缓存 → Redis Pub/Sub（频道 `hmdp:local-cache:evict`）通知其他副本删除 |
+| 退出登录后，其他副本上这个 token | 立即失效 | 收到广播后失效（通常是毫秒级）；广播丢失时最多 15s 后失效 |
+| token 在 Redis 里过期 / 被手工删除 | 立即失效 | 最多 15s 后失效 |
+| 登录态续期 | 距上次续期超过 30 分钟时续期 | 不变；只在本地缓存未命中、刚读过 Redis 时判断 |
+| Redis 里的登录态没有 `id` 字段 | 当作已登录、用户 id 为空 | 按未登录处理 |
+
+- 开关：`LOGIN_LOCAL_CACHE_SECONDS`（默认 15），`0` 关闭，回到每个请求一次 `HGETALL`。
+- 这是一个安全上的取舍：被踢下线 / 退出登录的 token 在广播丢失时还能在其他副本上用最多一个 TTL。不能接受时调小 TTL 或关闭。
+- 每个副本多一条 Redis 订阅连接。这个广播通道是通用的（消息格式 `缓存名|key`），E5 的多级缓存复用它。
+- 指标：`cache_gets_total{cache="loginUser",result="hit|miss"}`、`cache_size{cache="loginUser"}`。
+
+本机验证：同一 token 请求 2000 次 `/user/me`，`HGETALL` 次数 关闭时 2000、开启时 1（2 个副本各 1000 次时共 2）。
+在副本 1 退出登录后立刻访问副本 2：5 次试验 4 次立即 401；应用启动后的第一次广播那次，紧跟着的一个请求仍返回了 200，1 秒后复查为 401。
+
+### 1.10 多级缓存：本地缓存 + Redis（2026-11-20，阶段 3 的 E5）
+
+| 接口 | 之前 | 之后 |
+| --- | --- | --- |
+| `GET /shop/{id}` | 每次 `BITFIELD` + `GET` | 副本内 Caffeine 缓存 10s，命中时不访问 Redis；只缓存存在的店铺，不存在的 id 仍由布隆过滤器拦 |
+| `GET /shop-type/list` | 每次 `GET` | 同上 |
+| `GET /blog/hot` | 每次 `GET`（Redis 里按页缓存 60s） | 同上；`isLike` 仍按当前用户实时计算（每次复制一份再填，不改缓存里的对象） |
+| `PUT /shop` | 事务内更新 DB、删 Redis | 另外在事务提交后再删一次 Redis，并删本机本地缓存、广播其他副本删除（复用 1.9 的通道） |
+
+- 开关：`LOCAL_CACHE_ENABLED=false` 关闭本地一级，只用 Redis。TTL 与容量在 `hmdp.cache.local.*`（默认 10s、1 万条，约 30MB 堆）。
+- 新鲜度：更新店铺后，本副本立即生效，其他副本收到广播后生效；广播丢失时最多再读到 10s 的旧值。
+  商铺类型没有修改接口，直接改库后最多 10s + Redis 的 12 小时。热门笔记的点赞数原本就有约 60s 延迟，现在最多约 70s。
+- 不经过 `PUT /shop` 的修改（直接改库）不会触发失效，和原来的 Redis 缓存一样要等过期。
+- 指标：`cache_gets_total{cache="l1",result="hit|miss"}`。
+
+本机验证（2 个副本）：`/shop/1`、`/shop-type/list`、`/blog/hot` 各请求 2000 次，Redis 命令总数只增加 1–2 条（改造前约 4000 / 2000 / 2000 条）；
+副本 2 读过店铺后在副本 1 上改名，立即读副本 2 得到新名字（3 次都是）；用户 A 点赞热门笔记后，A 读到 `isLike=true`，用户 B 读到 `false`。
+
+### 1.11 秒杀售罄本地标记（2026-11-20，阶段 3 的 E6）
+
+| 场景 | 之前 | 之后 |
+| --- | --- | --- |
+| 券卖完之后的 `POST /voucher-order/seckill/{id}` | 每个请求一次订单号 `INCR` + 一次 Lua | Lua 返回库存不足后，副本内记 5s 的售罄标记；标记期间直接返回「库存不足」，不访问 Redis |
+| 标记期间，已经下过单的用户再次请求 | `不能重复下单` | `库存不足` |
+| 标记期间活动结束 | `秒杀已经结束` | 最多 5s 内仍返回 `库存不足` |
+| 超时关单回补库存、订单消息发送失败回滚库存、新增秒杀券 | — | 清除本机标记并广播其他副本清除（复用 1.9 的通道，消息 `soldOut\|{voucherId}`） |
+| 直接改 Redis 库存（运维、压测重置） | 立即可抢 | 最多 5s 后可抢；`perf/baseline/reset-seckill.sh` 已加上清除标记的广播 |
+
+- 开关：`SECKILL_SOLDOUT_FLAG=false`；标记保留时间 `hmdp.seckill.soldout-ttl-seconds`（默认 5）。
+- 被标记直接拒绝的请求计入 `hmdp_seckill_soldout_shortcut_total`，**不再计入** `hmdp_seckill_requests_total{result="sold_out"}`
+  （后者只统计真正执行了 Lua 的请求）。看板上的秒杀请求总数要把两者相加。
+- 不存在的券 id（库存 key 不存在）同样会被标记 5s。
+
+本机验证（库存 5 的券，1500 个不同用户、20 并发）：
+
+| | 成功 | Lua 执行次数 | 订单号 `INCR` |
+| --- | --- | --- | --- |
+| `SECKILL_SOLDOUT_FLAG=false` | 5 | 1500 | 1500 |
+| 默认（1 个副本） | 5 | 20 | 20 |
+
+两种配置下 DB 订单数都是 5、DB 与 Redis 库存都是 0。2 个副本持续请求（保持两边的标记都有效）时把一笔订单改成超时：
+定时任务在 18:58:26.647 关单回补，18:58:26.818 的下一个请求抢到，之后的请求重新返回库存不足。
+
+### 1.12 订单号本地生成（2026-11-20，阶段 3 的 E7）
+
+| | 之前 | 之后 |
+| --- | --- | --- |
+| 生成方式 | 每个订单号一次 Redis `INCR icr:order:{日期}` | 副本内生成，不访问 Redis |
+| id 布局（63 位） | 高 31 位 = 相对起始时间的秒数；低 32 位 = 当天计数 | 高 31 位不变；低 32 位 = `0` `1` + 机器号 10 位 + 秒内序列 20 位 |
+| 机器号 | — | 启动时在 Redis 抢占 0–1023 中的一个（`idworker:lease:{n}`，60s 过期），每 20s 续约，停机时释放 |
+
+- 开关：`ORDER_ID_MODE=redis` 回到每个订单号一次 `INCR`。两种 id 靠低 32 位的 bit30 区分，不会重复，可以随时切换、新旧副本可以混跑；
+  压测造数的 id 用 bit31，三者互不相交。
+- id 仍然大致按时间递增（高位是秒数），但同一秒内不同副本的 id 不再按生成先后排序；数值比以前大（同一秒内约大 2^30）。
+  订单号没有被当作连续序号使用，前端和 `/voucher-order/status/{orderId}` 不受影响。
+- 最多 1024 个副本；每个副本每秒 104 万个 id，用完时借用下一秒。
+- 安全措施：续约失败、或距上次成功续约超过 50s（Redis 里的租约 60s 才过期）时本地发号自动停用，退回 `INCR`，重新抢到机器号后恢复；
+  时钟回拨时序列的秒数不后退；续约时把用到的最大秒数记在 `idworker:floor:{n}`，下一个拿到同一机器号的实例从其后 30s 开始。
+- 定时任务线程池从 1 调到 4（`spring.task.scheduling.pool.size`），避免超时关单等长任务挡住续约。各任务自身仍是串行执行。
+
+本机验证：2 个副本、2000 个用户 40 并发下单，2000 笔全部成功，订单号 2000 个无重复（两个机器号各约 1000 个），
+DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`ORDER_ID_MODE=redis` 时 500 单 500 次）。
+手工删除一个副本的租约：下一次续约时发现并重新抢到新机器号。停机后租约立即释放。
+
+### 1.13 点赞数异步回写（2026-11-20，阶段 3 的 E8）
+
+| | 之前 | 之后 |
+| --- | --- | --- |
+| 点赞接口 | 每次点赞/取消同步 `UPDATE tb_blog SET liked = liked ± 1` | 只写 Redis：Lua 切换位图，并把 ±1 累加到 `blog:like:delta` |
+| 写库 | 请求线程内完成 | `LikeCountFlusher` 每 5s 批量回写，同一篇笔记的多次点赞合并成一条 `UPDATE` |
+| 笔记存在性 | 由 `UPDATE` 的影响行数判断 | 本地 Caffeine 缓存「已确认存在」的 id（10 分钟、上限 20 万），未命中才查一次主键 |
+
+- 开关：`LIKE_ASYNC_FLUSH=false` 回到同步写库。开关关闭后 `LikeCountFlusher` 仍会运行（把之前累积的增量写完）；
+  没有增量时每轮只多一次 Redis `EXISTS`。
+- 回写不丢：先把 `blog:like:delta` 原子改名为 `blog:like:delta:flushing`，写库成功后才删除；写库失败则保留，下一轮先重试这一批。
+  整批在一个事务里执行，不会只写一半。
+- 最多一次重复：写库事务已提交、删除 `flushing` 之前进程被杀时，这一批会在下一轮再加一遍（至少一次语义）。
+  窗口只有一次 `DEL` 的时间；点赞数不是账，接受这个误差。
+- **可见性延迟**：`tb_blog.liked` 最多滞后一个回写周期（默认 5s，`hmdp.like.flush-interval-ms`）。
+  依赖该列的「热门笔记」排序和笔记详情里的点赞数最多 5s 后更新；点赞状态本身（`isLike`）仍由位图实时判断，不受影响。
+- 取消点赞多于点赞时，`liked` 最低减到 0（SQL 为 `GREATEST(CAST(liked AS SIGNED) + ?, 0)`），无符号列不会下溢报错。
+- 点赞又取消（净 0）时，增量字段由 Lua 的 `HDEL` 删除，不会产生一次空写库。
+- 多副本：`LikeCountFlusher` 用 Redisson 锁 `lock:job:like-flush` 保证同一时刻只有一个副本回写。
+- 指标：`hmdp_like_flushed_rows_total`（每轮回写更新的行数）、`hmdp_like_flush_failures_total`（失败的轮数）。
+
+本机验证（2026-11-21，MySQL + Redis 本地，单副本）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 点赞 | 立即 `HGET blog:like:delta` = 1、位图 = 1、DB 未变；≤5s 后 DB +1，`delta` / `flushing` 清空；指标 `flushed_rows` = 2、`failures` = 0 |
+| 取消点赞 | 增量 -1、位图 = 0、DB 立即仍是旧值，下一轮 flush 后回到原值 |
+| 不存在的笔记 | 返回「笔记不存在！」，Redis 不产生增量 |
+| 点赞后立刻取消（净 0） | 增量字段被删除，DB 不变 |
+| 10 个用户并发点赞同一篇笔记 | 期间已回写 4 + 残留 6 = 10，最终 DB 正好 +10，无丢失 |
+| `LIKE_ASYNC_FLUSH=false` | 点赞后 DB 立即 +1，`blog:like:delta` 不存在；取消后 DB 立即回退 |
+
+未验证：写库中途失败的重试路径、提交后删除前进程被杀（均为代码审查）；多副本锁竞争为单实例实测。
+
 ## 2. Redis key 变化
 
 | key | 类型 | 说明 |
@@ -72,19 +266,31 @@
 | `lock:job:order-timeout` | Redisson 锁 | 超时关单任务集群互斥 |
 | `feed:{userId}` | zset | 行为变化：截断到最近 1000 条 |
 | `follows:{userId}` | set | 行为变化：缺失时由 `isFollow` 从 DB 重建 |
+| `bloom:shop:{位数}:{哈希数}` | string（位图） | 商铺布隆过滤器，取代 `bloom:shop`（见 1.7） |
+| `bloom:shop:keys` | set | 用过的布隆位图 key，用于容量变化后找到旧 key 并设过期 |
+| `outbox:{userId}` | zset | 作者发件箱：member = 笔记 id，score = 发布时间毫秒，保留最近 1000 条（见 1.8） |
+| `feed:bigv` | set | 大 V 的用户 id；这些作者的笔记不推送，由粉丝读取时拉取 |
+| `idworker:lease:{0-1023}` | string，TTL 60s | 订单号机器号的租约，值是持有副本的随机标识（见 1.12） |
+| `idworker:floor:{0-1023}` | string，TTL 1 天 | 该机器号已用到的最大秒数，防止换实例后时钟回拨造成重复 |
+| `icr:order:{日期}` | string 计数 | 行为变化：默认不再使用，只在 `ORDER_ID_MODE=redis` 或租约丢失回退时递增 |
+| `blog:like:delta` | hash | 待回写的点赞数增量：field = 笔记 id，value = 尚未写回 `tb_blog.liked` 的增量（见 1.13） |
+| `blog:like:delta:flushing` | hash | 正在回写的那一批增量；写库成功后删除，失败则保留到下一轮重试 |
+| `lock:job:like-flush` | Redisson 锁 | 点赞数回写任务集群互斥 |
 
 ## 3. 配置变化（`application.yaml`）
 
 | 配置 | 之前 | 之后 |
 | --- | --- | --- |
 | `spring.datasource.url` | `serverTimezone=UTC` | `serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true` |
-| `spring.datasource.hikari.maximum-pool-size` | 默认 10 | `${DB_POOL_MAX:30}`，`minimum-idle: 10`，`connection-timeout: 3000` |
+| `spring.datasource.hikari.maximum-pool-size` | 默认 10 | `${DB_POOL_MAX:30}`，`minimum-idle: 10`，`connection-timeout: 3000`（之后改为 `${DB_CONN_TIMEOUT_MS:800}`，见 1.6） |
+| `hmdp.db-gate.permits` | 无 | `${DB_GATE_PERMITS:-1}`（负数 = 连接池 × 2，0 = 关闭） |
 | `spring.data.redis.lettuce.pool.max-active` | 10 | 50（`max-wait: 2000ms`，`timeout: 2000ms`） |
 | `server.tomcat.*` | 默认 | `threads.max: 200`，`accept-count: 500`，`max-connections: 8192` |
 | `spring.servlet.multipart` | 默认 | `max-file-size: 5MB`，`max-request-size: 10MB` |
 | `spring.kafka.consumer.properties.max.poll.interval.ms` | 默认 | 300000 |
 | `hmdp.kafka.seckill-partitions` | 无（硬编码 3） | 12 |
 | `hmdp.upload.dir` | 无 | `${HMDP_UPLOAD_DIR:./upload}` |
+| `hmdp.like.async-flush` / `hmdp.like.flush-interval-ms` | 无 | `${LIKE_ASYNC_FLUSH:true}` / 5000ms；false 回到每次点赞同步写库（见 1.13） |
 | `logging.level.com.hmdp` | debug | info；`application-dev.yaml` 中为 debug（`--spring.profiles.active=dev`） |
 
 ## 4. 数据库变化
@@ -126,6 +332,7 @@ docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/mig
 | 扩缩容 | 不支持 | `docker compose -f deploy/docker-compose.yml up -d --scale app=3`，随后 `restart frontend` |
 | 上传图片 | 写本机硬编码目录 | 共享卷 `hmdp-upload-data`：app 挂 `/data/upload/blogs`，nginx 挂 `/usr/share/nginx/upload/imgs/blogs`（只读）；nginx 先找镜像内示例图，再找上传卷 |
 | 超时关单 | 每个实例都执行 | Redisson 锁保证同一时刻只有一个实例执行 |
+| 点赞数回写 | 每个实例都执行 | `LIKE_ASYNC_FLUSH` 透传到 app 容器；回写任务由 Redisson 锁保证只有一个实例执行 |
 | Kafka 秒杀主题 | 3 分区 | 启动时自动扩到 12 分区（只能增不能减） |
 | nginx | 单上游、无长连接复用 | `upstream` + `keepalive 64`、`proxy_next_upstream`、gzip、静态资源 7 天缓存、`X-Real-IP` 透传 |
 

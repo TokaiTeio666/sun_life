@@ -1,6 +1,6 @@
 # sun_life（黑马点评 · 秒杀模块 Kafka 改造版）
 
-> 基于黑马程序员《Spring Boot 实战》课程项目 **hm-dianping** 二次开发。核心改造：秒杀链路从 **Redis Stream 异步下单**升级为 **Kafka 异步下单**（`acks=all` + 幂等生产者 + 手动提交 offset + 重试/DLT）；技术栈升级到 **Java 17 / Spring Boot 3 / MySQL 8 / Redis 7 / Kafka 3.7**；补齐**布隆过滤器、TTL 抖动、点赞 BitMap、UV HyperLogLog** 等缓存与统计能力。本项目用于学习与简历展示，**非独立自研项目**，改造与新增部分为本人独立完成。
+> 基于黑马程序员《Spring Boot 实战》课程项目 **hm-dianping** 二次开发。核心改造：秒杀链路从 **Redis Stream 异步下单**升级为 **Kafka 异步下单**（`acks=all` + 幂等生产者 + 手动提交 offset + 重试/DLT）；技术栈升级到 **Java 21（虚拟线程）/ Spring Boot 3 / MySQL 8 / Redis 7 / Kafka 3.7**；补齐**布隆过滤器、TTL 抖动、点赞 BitMap、UV HyperLogLog** 等缓存与统计能力。本项目用于学习与简历展示，**非独立自研项目**，改造与新增部分为本人独立完成。
 
 ---
 
@@ -20,7 +20,7 @@
 
 | 分类 | 技术 | 用途 |
 | --- | --- | --- |
-| 基础框架 | Spring Boot 3.3.5 / Java 17 | 应用骨架 |
+| 基础框架 | Spring Boot 3.3.5 / Java 21 | 应用骨架；Tomcat 请求线程使用虚拟线程（`VIRTUAL_THREADS=false` 可关闭） |
 | 持久层 | MyBatis-Plus 3.5.7 / MySQL 8 | ORM 与数据存储 |
 | 缓存 | Redis 7（StringRedisTemplate） | 缓存、布隆过滤器、BitMap、HyperLogLog、GEO、ZSet Feed 流 |
 | 分布式锁 | Redisson 3.32.0 | 可重入锁、防重复下单、联锁（测试） |
@@ -132,7 +132,7 @@ sequenceDiagram
 
 | 问题 | 方案 | 实现位置 |
 | --- | --- | --- |
-| **穿透** | Redis BitMap 布隆过滤器前置拦截（预期 1 万条、误判率 1%，双哈希 7 个函数）；另保留空值缓存兜底 | `RedisBloomFilter` / `BloomFilterInitializer` |
+| **穿透** | Redis BitMap 布隆过滤器前置拦截（设计容量默认 100 万条、可配置，误判率 1%，双哈希 7 个函数）；另保留空值缓存兜底 | `RedisBloomFilter` / `BloomFilterInitializer` |
 | **击穿** | 互斥锁（`SimpleRedisLock` + Redisson）与 **逻辑过期** 双方案，封装通用 `CacheClient` | `CacheClient` |
 | **雪崩** | 所有 TTL 统一叠加 **±10% 随机抖动**，避免同批 key 同时失效 | `CacheClient#jitteredSeconds` |
 | **一致性** | 先更新 DB 再删缓存，配合过期兜底 | `ShopServiceImpl#update` |
@@ -145,7 +145,9 @@ sequenceDiagram
 - **点赞关系**：由 ZSet 改为 **BitMap**，`userId` 直接作为 bit offset，点赞/取消/判断都是 O(1)、每用户 1 bit；
 - **TopN 展示**：另保留一个 **有界 ZSet**（最多 1000 个用户）记录点赞时间，用于「点赞用户 Top5」，不会无限增长；
 - **日 UV**：笔记详情页按 `uv:blog:{id}:{yyyyMMdd}` 写入 HyperLogLog，固定约 12KB/键，35 天自动过期；
-  新增 `GET /blog/uv/{id}?date=yyyyMMdd` 查询。
+  新增 `GET /blog/uv/{id}?date=yyyyMMdd` 查询；
+- **点赞数异步回写**：点赞只写 Redis，±1 增量记在 `blog:like:delta`，`LikeCountFlusher` 每 5s 合并成一条 `UPDATE`
+  批量回写 `tb_blog.liked`；`LIKE_ASYNC_FLUSH=false` 回到同步写库（可见性最多延迟一个周期，见 `docs/behavior-changes.md` 1.13）。
 
 内存实测（10 万个用户，`MEMORY USAGE`）：
 
@@ -157,7 +159,7 @@ sequenceDiagram
 ### 4.4 其他业务能力
 
 - **登录**：短信验证码（Redis 存储）+ Token 会话 + 双拦截器（登录校验 + Token 刷新续期）；
-- **关注/Feed 流**：Redis ZSet 实现关注列表、共同关注、收件箱滚动分页（按时间戳，无重复无遗漏）；
+- **关注/Feed 流**：Redis ZSet 实现关注列表、共同关注、收件箱滚动分页（按时间戳，无重复无遗漏）；发笔记经 Kafka 异步分批推送，大 V 不推送、读取时合并其发件箱（推拉结合）；
 - **附近商铺**：Redis GEO 按距离检索；
 - **签到**：BitMap 按月聚合；
 - **分布式锁**：SETNX + 过期时间 + Lua 校验持有者，另对比 Redisson 的可重入与看门狗；
@@ -250,7 +252,7 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 | `mysql` | mysql:8.0 | 首次启动自动导入 `hmdp.sql` 建库建表（关闭严格模式兼容课程 SQL），数据卷 `hmdp-mysql8-data` |
 | `redis` | redis:7.2 | 缓存/布隆过滤器/位图/HLL/锁/库存 |
 | `kafka` | apache/kafka:3.7.0 | KRaft 单节点，秒杀异步消息 / 重试 / DLT |
-| `app` | 本地构建（eclipse-temurin:17-jre） | Spring Boot 3 应用，无状态，可 `--scale app=N` 多副本 |
+| `app` | 本地构建（eclipse-temurin:21-jre） | Spring Boot 3 应用，无状态，可 `--scale app=N` 多副本 |
 | `frontend` | nginx:1.18-alpine | 前端静态页 + 网关：`/api`（8080）与 8081 入口均负载均衡到所有 `app` 副本，秒杀接口限流 |
 
 > 访问方式：
@@ -263,6 +265,8 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 > 扩容到多副本：`docker compose -f deploy/docker-compose.yml up -d --scale app=3`，之后 `restart frontend` 让 nginx 重新解析副本。
 > 已有数据卷的环境需补索引：`docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/migration_v2.sql`。
 > 扩容路线与各阶段优化说明见 [docs/scaling-roadmap.md](docs/scaling-roadmap.md)。
+> 监控（Prometheus + Grafana + exporter，Grafana `localhost:3000`）：主编排后追加 `-f deploy/docker-compose.monitoring.yml`，
+> 说明见 [docs/monitoring.md](docs/monitoring.md)。
 >
 > **实测记录**（Docker Desktop 4.91 + WSL2 后端）：
 > 一键启动后 5 个服务全部健康；前端 `localhost:8080` 页面可访问，经 `/api` 代理登录 → 秒杀下单 → Kafka
@@ -319,6 +323,7 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 ```
 
 完整口径、重置脚本与实测数据见 [`perf/README.md`](perf/README.md)。
+容量基线（组件单测、单实例拐点、扩展效率、混合场景、容量模型）见 [`perf/baseline/README.md`](perf/baseline/README.md)。
 
 ---
 
@@ -337,12 +342,13 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 | `service/impl/VoucherOrderServiceImpl.java` | Lua 扣减 + 异步 Kafka + 发送失败回滚 + 超时关单 |
 | `resources/seckill.lua` / `seckill_rollback.lua` | Lua 只做扣减；新增投递失败补偿脚本 |
 | `config/SeckillStockInitializer.java` | 启动时自动预热秒杀库存到 Redis（幂等，Docker 一键启动后立即可秒杀） |
-| `utils/RedisBloomFilter.java` | Redis BitMap 布隆过滤器（双哈希、pipeline 批量写入、启动预热） |
-| `config/BloomFilterInitializer.java` | 启动时把商铺 id 预热进布隆过滤器 |
+| `utils/RedisBloomFilter.java` | Redis BitMap 布隆过滤器（双哈希、一条 BITFIELD 读写、容量可配置、key 带位图参数） |
+| `config/BloomFilterInitializer.java` | 启动时按 id 游标分批把商铺 id 预热进布隆过滤器，之后定时增量同步 |
 | `utils/CacheClient.java` | 空值缓存 + 互斥锁/逻辑过期 + TTL ±10% 抖动 |
-| `service/impl/BlogServiceImpl.java` | 点赞 BitMap（userId 作 offset）+ 有界 ZSet TopN + 日 UV HyperLogLog |
+| `service/impl/BlogServiceImpl.java` | 点赞 BitMap（userId 作 offset）+ 有界 ZSet TopN + 日 UV HyperLogLog + 点赞增量异步回写 |
+| `mq/LikeCountFlusher.java` | 点赞数定时批量回写 `tb_blog.liked`（改名取批、失败保留重试、Redisson 锁） |
 | `controller/BlogController.java` | 新增 `GET /blog/uv/{id}` 日 UV 查询 |
-| `pom.xml` / `application.yaml` / `deploy/Dockerfile` / `deploy/docker-compose.yml` | 升级 Java 17 / Spring Boot 3 / MySQL 8 / Redis 7，补齐 Boot 3 配置 |
+| `pom.xml` / `application.yaml` / `deploy/Dockerfile` / `deploy/docker-compose.yml` | 升级 Java 21 / Spring Boot 3 / MySQL 8 / Redis 7，补齐 Boot 3 配置 |
 | `perf/gen_tokens.ps1` / `perf/bench-voucher.sql` / `perf/shop-detail-bench.jmx` | 无 Python 依赖的压测数据准备与缓存 A/B 脚本 |
 | `perf/lock-failover-demo.ps1` | 复现 Redis 主从切换导致分布式锁失效，验证 DB 唯一索引兜底的必要性 |
 

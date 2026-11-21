@@ -1,6 +1,8 @@
 package com.hmdp.config;
 
+import com.hmdp.metrics.BizMetrics;
 import com.hmdp.mq.KafkaConstants;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.TopicPartition;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,6 +21,7 @@ import org.springframework.util.backoff.FixedBackOff;
 /**
  * Kafka 配置：主题创建 + 批量消费容器 + 消费失败重试 + 死信主题。
  */
+@Slf4j
 @Configuration
 public class KafkaConfig {
 
@@ -29,6 +32,10 @@ public class KafkaConfig {
      */
     @Value("${hmdp.kafka.seckill-partitions:12}")
     private int seckillPartitions;
+
+    /** 笔记发布主题分区数：Feed 分发的最大并行度 */
+    @Value("${hmdp.feed.partitions:3}")
+    private int feedPartitions;
 
     @Bean
     public NewTopic seckillOrderTopic() {
@@ -74,6 +81,38 @@ public class KafkaConfig {
         factory.setBatchListener(true);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.BATCH);
         factory.setCommonErrorHandler(kafkaErrorHandler);
+        return factory;
+    }
+
+    /** 笔记发布主题：key = 作者 id，同一作者的笔记按发布顺序分发 */
+    @Bean
+    public NewTopic blogPublishedTopic() {
+        return TopicBuilder.name(KafkaConstants.BLOG_PUBLISHED_TOPIC)
+                .partitions(feedPartitions)
+                .replicas(1)
+                .build();
+    }
+
+    /**
+     * Feed 分发专用监听容器：单条消费，监听器正常返回后提交位点（AckMode.RECORD）。
+     * 失败间隔 1s 重试 3 次；仍失败只记录日志和指标后跳过——分发失败的后果是部分粉丝的 Feed 里少一条笔记，
+     * 不值得进死信人工处理，也不能用秒杀订单的死信主题。消息格式错误不重试。
+     */
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<Object, Object> feedListenerFactory(
+            ConcurrentKafkaListenerContainerFactoryConfigurer configurer,
+            ConsumerFactory<Object, Object> consumerFactory,
+            BizMetrics bizMetrics) {
+        ConcurrentKafkaListenerContainerFactory<Object, Object> factory = new ConcurrentKafkaListenerContainerFactory<>();
+        configurer.configure(factory, consumerFactory);
+        factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.RECORD);
+        DefaultErrorHandler handler = new DefaultErrorHandler((record, ex) -> {
+            bizMetrics.feedFanoutFailed();
+            log.error("笔记 Feed 分发失败，已跳过 partition={} offset={} value={}",
+                    record.partition(), record.offset(), record.value(), ex);
+        }, new FixedBackOff(1000L, 3L));
+        handler.addNotRetryableExceptions(IllegalArgumentException.class);
+        factory.setCommonErrorHandler(handler);
         return factory;
     }
 }

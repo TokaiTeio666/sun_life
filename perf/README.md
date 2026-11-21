@@ -3,6 +3,10 @@
 本文记录 `perf/` 下两组压测的完整步骤与口径。所有数字均来自本机实跑，
 环境为 Windows 11 + Docker Desktop（应用 / MySQL 8 / Redis 7 / RocketMQ 同机）。
 
+> 这些是**整机上限**（压测机与所有组件同机），不能当作应用或单个组件的容量。
+> 阶段 3 的容量基线（压测机分离、组件单测、拐点、扩展效率、混合场景）见 [baseline/README.md](baseline/README.md)。
+> JMX 均支持 `-JSERVER_HOST`（默认 127.0.0.1）与 `-JDURATION`（秒）。
+
 ## 0. 前置
 
 ```powershell

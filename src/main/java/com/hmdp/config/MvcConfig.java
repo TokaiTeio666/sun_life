@@ -4,7 +4,6 @@ import com.hmdp.utils.LoginInterceptor;
 import com.hmdp.utils.RefreshInterceptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -12,7 +11,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class MvcConfig implements WebMvcConfigurer {
 
     @Autowired
-    private StringRedisTemplate stringRedisTemplate;
+    private RefreshInterceptor refreshInterceptor;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry){
@@ -28,6 +27,6 @@ public class MvcConfig implements WebMvcConfigurer {
                     "/user/login"
         ).order(1);
         //刷新拦截器
-        registry.addInterceptor(new RefreshInterceptor(stringRedisTemplate)).addPathPatterns("/**").order(0);
+        registry.addInterceptor(refreshInterceptor).addPathPatterns("/**").order(0);
     }
 }

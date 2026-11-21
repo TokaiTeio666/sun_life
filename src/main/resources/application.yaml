@@ -2,14 +2,23 @@ server:
   port: 8081
   tomcat:
     # 线程数要与下游连接池匹配：200 个线程抢 10 个 DB 连接只会在池上排队
+    # （仅在 hmdp.web.virtual-threads=false 时生效）
     threads:
       max: 200
       min-spare: 20
     accept-count: 500
     max-connections: 8192
+    # 暴露 tomcat.threads.busy 等 MBean 指标（容量评估需要看繁忙线程数）
+    mbeanregistry:
+      enabled: true
 spring:
   application:
     name: hmdp
+  task:
+    scheduling:
+      # 定时任务默认只有 1 个线程：超时关单、布隆同步跑得久时会挡住订单号机器号的续约（20s 一次）
+      pool:
+        size: 4
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     # rewriteBatchedStatements：saveBatch 真正合并成多值 INSERT（秒杀批量落库依赖）
@@ -20,7 +29,9 @@ spring:
       # 经验值：连接数 ≈ CPU 核数 × 2 + 有效磁盘数；多实例时注意 实例数 × 该值 < MySQL max_connections
       maximum-pool-size: ${DB_POOL_MAX:30}
       minimum-idle: 10
-      connection-timeout: 3000
+      # 等连接的最长时间。过载时与其让请求排 3s 再失败，不如 800ms 就返回 503（见 WebExceptionAdvice）；
+      # Hikari 允许的最小值是 250。Kafka 消费者和定时任务也用这个池，超时后由各自的重试机制处理
+      connection-timeout: ${DB_CONN_TIMEOUT_MS:800}
       idle-timeout: 600000
       max-lifetime: 1800000
   data:
@@ -68,12 +79,64 @@ spring:
       concurrency: 3
 # 业务自定义配置
 hmdp:
+  web:
+    # JDK 21 虚拟线程：Tomcat 每个请求一个虚拟线程（只切换请求线程，Kafka 消费者与定时任务仍用平台线程，
+    # 原因见 VirtualThreadConfig）。开启后并发上限由下游连接池决定。回退 / A/B 对比：VIRTUAL_THREADS=false
+    virtual-threads: ${VIRTUAL_THREADS:true}
+  # 过载保护：回源 DB 的并发闸（见 DbGate）。同时在查库 / 等连接的请求数超过许可数时立即返回 503。
+  # 负数 = 连接池大小 × 2；0 = 关闭；正数 = 指定许可数
+  db-gate:
+    permits: ${DB_GATE_PERMITS:-1}
   # 图片上传根目录：多实例部署时必须是共享存储（docker volume / NFS），或替换为 OSS 实现
   upload:
     dir: ${HMDP_UPLOAD_DIR:./upload}
   # 压测开关：false 时商铺详情跳过布隆过滤器与缓存，直接查库（用于 A/B 对比）
   cache:
     enabled: true
+    # 多级缓存的第一级：副本内的 Caffeine 短缓存（店铺详情、商铺类型、热门笔记），命中时不访问 Redis。
+    # 更新店铺时广播删除；广播丢失时其他副本最多读到 ttl-seconds 的旧值。关闭：LOCAL_CACHE_ENABLED=false
+    local:
+      enabled: ${LOCAL_CACHE_ENABLED:true}
+      ttl-seconds: 10
+      # 条数上限（一个店铺对象约 2–3KB，1 万条约 30MB；按堆大小调整）
+      max-size: 10000
+  # 商铺布隆过滤器。位图大小约 expected-insertions × 9.6 位（100 万 ≈ 1.2MB）；实际商铺数超过设计容量后误判率快速上升。
+  # 改这两个值会换一个新的位图 key（bloom:shop:{位数}:{哈希数}）并在启动时重新预热，旧 key 1 天后过期
+  bloom:
+    expected-insertions: ${BLOOM_EXPECTED_INSERTIONS:1000000}
+    fpp: 0.01
+    # 增量同步间隔：补上不经过本副本写入的新商铺，并检查位图是否丢失
+    sync-interval-ms: 60000
+  # 点赞数异步回写（见 LikeCountFlusher）：点赞接口只写 Redis，增量每 flush-interval-ms 批量写回 tb_blog.liked。
+  # false = 回到每次点赞更新一次 tb_blog
+  like:
+    async-flush: ${LIKE_ASYNC_FLUSH:true}
+    flush-interval-ms: 5000
+  # 订单号生成方式（见 RedisIdWorker）：local = 本地发号（启动时在 Redis 抢占机器号并续约，发号不访问 Redis）；
+  # redis = 改造前的方式，每个订单号一次 INCR。两种 id 不会重复，可以随时切换
+  id:
+    mode: ${ORDER_ID_MODE:local}
+  # 秒杀售罄本地标记（见 SeckillSoldOutFlags）：Lua 返回库存不足后在副本内记几秒，期间该券的请求直接返回，不访问 Redis。
+  # 库存回补（超时关单、发送失败回滚）时广播清除；ttl 是广播丢失或直接改 Redis 库存时的兜底
+  seckill:
+    soldout-flag: ${SECKILL_SOLDOUT_FLAG:true}
+    soldout-ttl-seconds: 5
+  # 登录态本地短缓存（见 LoginUserCache）：token → 用户在副本内缓存若干秒，省掉每个请求一次 HGETALL。
+  # 退出登录 / token 过期在其他副本上最多延迟这么久生效；0 = 关闭
+  login:
+    local-cache-seconds: ${LOGIN_LOCAL_CACHE_SECONDS:15}
+    local-cache-max-size: 200000
+  # 关注 Feed 的分发（见 FeedService）
+  feed:
+    # true：发帖只写发件箱并发一条 Kafka 消息，由消费者分批推送；false：回到在请求线程里同步推送给全部粉丝
+    async-push: ${FEED_ASYNC_PUSH:true}
+    # 粉丝数超过该值的作者（大 V）不推送，粉丝读 Feed 时从作者发件箱拉取；<= 0 表示不区分大 V
+    bigv-threshold: ${FEED_BIGV_THRESHOLD:5000}
+    # 推送时每页粉丝数（一次 DB 查询 + 一个 Redis pipeline）
+    push-batch-size: 1000
+    # blog.published 主题分区数与每个副本的消费线程数
+    partitions: 3
+    consumer-concurrency: 2
   kafka:
     # 秒杀主题分区数（只能增不能减）；整个消费组的最大并行度 = 分区数
     seckill-partitions: 12
@@ -83,6 +146,31 @@ hmdp:
     # 未支付订单超时时长与扫描间隔（Kafka 无延迟消息，改用本地定时任务）
     timeout-minutes: 30
     timeout-scan-ms: 60000
+  metrics:
+    # 秒杀库存对账（Redis 与 DB 库存差值）采样间隔
+    stock-gap-scan-ms: 15000
+# ========== 监控（阶段 3-1） ==========
+# 管理端口与业务端口分离：网关只代理 8081，/actuator 不会对外暴露；Prometheus 在容器网络内抓取 9081
+management:
+  server:
+    port: ${MANAGEMENT_PORT:9081}
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # 输出直方图桶，Prometheus 端可跨实例聚合出 P95 / P99（客户端计算的分位数无法聚合）
+      percentiles-histogram:
+        http.server.requests: true
+      maximum-expected-value:
+        http.server.requests: 5s
 mybatis-plus:
   type-aliases-package: com.hmdp.entity # 别名扫描包
 logging:
