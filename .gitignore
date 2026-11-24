@@ -1,5 +1,7 @@
 HELP.md
 target/
+__pycache__/
+*.pyc
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
@@ -52,6 +54,8 @@ deploy/cpolar.log
 deploy/cpolar.err.log
 # 分机压测的环境变量（含内网 IP 与密码），示例见 deploy/bench.env.example
 deploy/bench.env
+# 本机压测的环境变量，示例见 deploy/bench.local.env.example
+deploy/bench.local.env
 
 # 容量基线：JMeter 原始数据与 HTML 报告不入库，summary.md / results.json / component.md 入库
 perf/baseline/results/**/run.jtl

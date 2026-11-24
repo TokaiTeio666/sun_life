@@ -335,6 +335,8 @@ docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/mig
 | 点赞数回写 | 每个实例都执行 | `LIKE_ASYNC_FLUSH` 透传到 app 容器；回写任务由 Redisson 锁保证只有一个实例执行 |
 | Kafka 秒杀主题 | 3 分区 | 启动时自动扩到 12 分区（只能增不能减） |
 | nginx | 单上游、无长连接复用 | `upstream` + `keepalive 64`、`proxy_next_upstream`、gzip、静态资源 7 天缓存、`X-Real-IP` 透传 |
+| 客户端 / 网关 keep-alive | nginx 1.18 默认每连接 100 个请求（1.19 起才是 1000），Tomcat 默认也是 100 | 都调到 `100000`：本机基线 20k QPS 时曾 30s 堆出 8874 个 TIME_WAIT、200 并发 1.33% `BindException`，调大后消失 |
+| 旧数据卷升级 | 只有 `hmdp.sql` 初始化时的结构 | 早期数据卷需手动执行 `src/main/resources/db/migration_v2.sql` 补索引；`seed_data.py` 现在会预检，缺失时直接报错 |
 
 **容量注意**：每个副本最多 30 个 DB 连接，`副本数 × DB_POOL_MAX` 需小于 MySQL `max_connections`（默认 151）。
 

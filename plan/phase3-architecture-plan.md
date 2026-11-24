@@ -106,7 +106,7 @@
 | Grafana 大盘（8 组 43 个面板）+ 第一版告警（21 条告警 + 5 条记录规则，含 runbook） | `deploy/monitoring/`、`docs/monitoring.md` | ✅ |
 | MySQL 慢查询日志（> 200ms） | `deploy/docker-compose.yml` | ✅ |
 | 组件单测 / 单实例拐点 / 扩展效率 / 混合场景 / 容量模型工具 | `perf/baseline/`、`perf/mixed-bench.jmx` | ✅ |
-| 《容量基线报告》 | `docs/capacity-baseline-report.md` | ⏳ 模板已就绪，**需在压测机与被测服务分离的环境实测填写** |
+| 《容量基线报告》 | `docs/capacity-baseline-report.md` | ✅ 组件单测 + 单实例拐点已按**本机受控基线**填写（2026-11-24，被测机 = 压测机，只作下限）；⏳ 分机容量基线（扩展效率）待有条件时实测 |
 | 3-2 执行顺序 | 同上第 7 节 | ⏳ 依赖基线数据 |
 
 与方案的偏差：
@@ -118,6 +118,7 @@
 | — | 业务指标不以 `created` 结尾、DistributionSummary 不设 baseUnit | 实测发现 `*_created` 被 OpenMetrics 当作保留后缀丢弃，baseUnit 会被拼进指标名 |
 | — | 未部署 Alertmanager，告警在 Prometheus 中可见 | 本地无通知渠道；上线时按 `severity` 标签路由 |
 | SkyWalking 常驻 | 独立叠加编排，按需开启；OAP 用 H2、数据保留 2 天（10.x 下限）；agent 忽略 `/actuator/**` | OAP 较重，agent 有开销，做拐点压测时不应开启 |
+| 容量基线在压测机与被测服务分离的环境实测 | 2026-11-24 先做**本机受控基线**（被测机 = 压测机），扩展效率未测；分机步骤保留在 `docs/bench-deploy.md` | 不再长期租服务器；本机数字只作下限，进入 3-2 前需补一次分机 scale 测试 |
 
 本地验证（单机 Docker Desktop，2 副本）：Prometheus 全部 target 正常（cAdvisor 未启用除外）、26 条规则（21 告警 + 5 记录）全部健康；
 看板和规则引用的 57 个指标名在 Prometheus 中全部存在；200 用户秒杀后 `hmdp_seckill_orders_persisted_total` = DB 订单数，

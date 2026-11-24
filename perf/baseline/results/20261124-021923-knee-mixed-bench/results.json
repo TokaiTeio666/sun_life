@@ -1,0 +1,124 @@
+{
+  "kind": "knee",
+  "args": {
+    "cmd": "knee",
+    "jmx": "perf/mixed-bench.jmx",
+    "host": "127.0.0.1",
+    "port": "8081",
+    "duration": 30,
+    "token_file": "token.txt",
+    "jmeter": "jmeter",
+    "prop": [
+      "SHOP_MAX=10000"
+    ],
+    "slo_p99_ms": 100.0,
+    "max_error": 0.001,
+    "before_each": "bash perf/baseline/reset-seckill.sh",
+    "cooldown": 10,
+    "out": null,
+    "threads": "50,100,200,400",
+    "flat_gain": 0.05,
+    "keep_going": false
+  },
+  "rows": [
+    {
+      "qps": 13592.692191334163,
+      "samples": 404369,
+      "mean_ms": 3.3224233311653824,
+      "p90_ms": 6.0,
+      "p95_ms": 7.0,
+      "p99_ms": 10.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "POST /voucher-order/seckill/{id}": {
+          "qps": 682.1433391820758,
+          "p99_ms": 8.0,
+          "error_ratio": 0.0
+        },
+        "GET /shop/{id}": {
+          "qps": 9515.564071534222,
+          "p99_ms": 6.0,
+          "error_ratio": 0.0
+        },
+        "GET /blog/hot": {
+          "qps": 2041.743814172698,
+          "p99_ms": 9.0,
+          "error_ratio": 0.0
+        },
+        "GET /blog/of/follow": {
+          "qps": 1361.2766387233612,
+          "p99_ms": 13.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 50,
+      "verdict": "ok"
+    },
+    {
+      "qps": 14976.726170427753,
+      "samples": 444659,
+      "mean_ms": 6.080819234514422,
+      "p90_ms": 12.0,
+      "p95_ms": 16.0,
+      "p99_ms": 23.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "POST /voucher-order/seckill/{id}": {
+          "qps": 749.9493824660863,
+          "p99_ms": 17.0,
+          "error_ratio": 0.0
+        },
+        "GET /shop/{id}": {
+          "qps": 10484.43920511957,
+          "p99_ms": 12.0,
+          "error_ratio": 0.0
+        },
+        "GET /blog/hot": {
+          "qps": 2249.28328105501,
+          "p99_ms": 18.0,
+          "error_ratio": 0.0
+        },
+        "GET /blog/of/follow": {
+          "qps": 1499.645856521299,
+          "p99_ms": 31.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 100,
+      "verdict": "ok"
+    },
+    {
+      "qps": 14039.494150267126,
+      "samples": 415204,
+      "mean_ms": 13.113149198947854,
+      "p90_ms": 21.0,
+      "p95_ms": 35.0,
+      "p99_ms": 188.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "POST /voucher-order/seckill/{id}": {
+          "qps": 702.8428150306645,
+          "p99_ms": 55.0,
+          "error_ratio": 0.0
+        },
+        "GET /shop/{id}": {
+          "qps": 9828.903766822208,
+          "p99_ms": 21.0,
+          "error_ratio": 0.0
+        },
+        "GET /blog/hot": {
+          "qps": 2109.485094850949,
+          "p99_ms": 251.0,
+          "error_ratio": 0.0
+        },
+        "GET /blog/of/follow": {
+          "qps": 1406.0838047491616,
+          "p99_ms": 334.9800000000032,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 200,
+      "verdict": "P99 188ms > SLO 100ms"
+    }
+  ]
+}

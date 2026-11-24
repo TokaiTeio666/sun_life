@@ -1,0 +1,77 @@
+{
+  "kind": "knee",
+  "args": {
+    "cmd": "knee",
+    "jmx": "perf/seckill-bench.jmx",
+    "host": "127.0.0.1",
+    "port": "8081",
+    "duration": 30,
+    "token_file": "token.txt",
+    "jmeter": "jmeter",
+    "prop": null,
+    "slo_p99_ms": 100.0,
+    "max_error": 0.001,
+    "before_each": "bash perf/baseline/reset-seckill.sh",
+    "cooldown": 10,
+    "out": null,
+    "threads": "100,200,400",
+    "flat_gain": 0.05,
+    "keep_going": false
+  },
+  "rows": [
+    {
+      "qps": 17360.88533619937,
+      "samples": 516903,
+      "mean_ms": 5.629058063118209,
+      "p90_ms": 8.0,
+      "p95_ms": 9.0,
+      "p99_ms": 12.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "秒杀接口": {
+          "qps": 17360.88533619937,
+          "p99_ms": 12.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 100,
+      "verdict": "ok"
+    },
+    {
+      "qps": 17948.205833976703,
+      "samples": 534695,
+      "mean_ms": 10.936702232113705,
+      "p90_ms": 15.0,
+      "p95_ms": 16.0,
+      "p99_ms": 22.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "秒杀接口": {
+          "qps": 17948.205833976703,
+          "p99_ms": 22.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 200,
+      "verdict": "ok"
+    },
+    {
+      "qps": 18806.480981926084,
+      "samples": 557725,
+      "mean_ms": 20.950810883500733,
+      "p90_ms": 37.0,
+      "p95_ms": 72.0,
+      "p99_ms": 259.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "秒杀接口": {
+          "qps": 18806.480981926084,
+          "p99_ms": 259.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 400,
+      "verdict": "P99 259ms > SLO 100ms"
+    }
+  ]
+}

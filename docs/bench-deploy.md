@@ -127,7 +127,59 @@ docker compose --env-file deploy/bench.env -f deploy/docker-compose.yml -f deplo
 
 这样单实例拐点可信，但所有组件抢同一台机器的 CPU，扩展效率偏低估，瓶颈归因也不如分机清楚。
 
-## 收尾
+## 完全不想租服务器：本机基线
 
-测完把 `perf/baseline/results/` 里的 `summary.md`、`results.json`、`component.md` 和 Grafana 截图拷回来，
-填进 [capacity-baseline-report.md](capacity-baseline-report.md)，然后释放按量付费的机器。
+压测客户端和整套服务跑在同一台开发机上。**结论只能当该机器的下限**：绝对 QPS 不能与分机基线横比，
+`--scale` 也不会增加总容量，所以第 3 步（扩展效率）不做，只做组件单测 + 单实例拐点 + 混合场景。
+
+```bash
+# 1. 资源隔离：给 WSL 限线程和内存，把剩下的核留给 Windows 上的 JMeter
+#    C:\Users\<user>\.wslconfig: memory=20GB / processors=16，然后 wsl --shutdown
+
+# 2. 用本机专用的环境变量启动（端口、密码、缓冲池、堆大小都在里面）
+cp deploy/bench.local.env.example deploy/bench.local.env
+docker compose --env-file deploy/bench.local.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml --profile resources up -d --build
+
+# 3. 旧数据卷先补索引：早期 hmdp.sql 没有 idx_*，漏了会让「热门笔记」退化成全表 filesort
+docker exec -i -e MYSQL_PWD=123456 hmdp-mysql mysql -uroot hmdp < src/main/resources/db/migration_v2.sql
+
+# 4. 1/10 规模造数（约 150 MB，几十秒），然后重启 app 让布隆过滤器预热
+python perf/baseline/seed_data.py --users 100000 --shops 10000 --orders 1000000 \
+    --feed-users 10000 --buffer-pool-gb 4
+docker compose --env-file deploy/bench.local.env -f deploy/docker-compose.yml restart app frontend
+
+# 5. 组件单测 + 单实例拐点
+bash perf/baseline/component-bench.sh redis mysql kafka
+python perf/baseline/baseline.py knee --jmx perf/shop-detail-bench.jmx \
+    --threads 50,100,200,400 --duration 30 --prop SHOP_MAX=10000
+python perf/baseline/baseline.py knee --jmx perf/mixed-bench.jmx --token-file token.txt \
+    --threads 50,100,200,400 --duration 30 --prop SHOP_MAX=10000 \
+    --before-each "bash perf/baseline/reset-seckill.sh"
+```
+
+注意事项：
+
+- **JMeter 在 Windows 宿主上跑**（如 `D:\apache-jmeter-5.6.3\bin`），不要放进 WSL，否则和被测服务抢同一个 cgroup；
+- 部署时如果 `auth.docker.io` 超时，可从镜像站拉基础镜像再打回原名，构建加 `--pull=false`；
+- `--buffer-pool-gb` 只改运行时值，MySQL 重启后退回启动参数；正式跑之前确认 `MYSQL_BUFFER_POOL` 生效；
+- 结果填进报告的「本机基线」一节，并注明「被测机 = 压测机」。
+
+## 收尾与退租
+
+测完先留证据，再释放资源，否则云盘 / EIP 会继续计费：
+
+1. **拷回结果**：`perf/baseline/results/` 下的 `summary.md`、`results.json`、`component.md`，以及各面板的 Grafana 截图；
+   填进 [capacity-baseline-report.md](capacity-baseline-report.md)；
+2. **保留配置**：`deploy/bench.env`（含内网 IP 与密码）拷回本地；业务数据不用导，`seed_data.py` 可以按目标规模重新生成；
+3. **云控制台逐项释放**：实例 → 弹性公网 IP（EIP）→ 云盘 → 快照 → 带宽包 / 负载均衡。
+   **只释放实例的话，独立云盘和 EIP 仍会按天计费**；
+4. **以后可能回来**：先给系统盘打快照再释放实例，快照按存储量收费；或者下次直接按量付费几小时重跑；
+5. **本机基线环境**（如果用的是「完全不想租服务器」那套）：
+
+   ```bash
+   docker compose --env-file deploy/bench.local.env \
+     -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml --profile resources down
+   ```
+
+   数据卷会保留，下次 `up -d` 继续用；`C:\Users\<user>\.wslconfig` 里的 WSL 资源限制不需要时删掉，再 `wsl --shutdown`。

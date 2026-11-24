@@ -13,6 +13,9 @@
 ## 环境要求
 
 - **压测机与被测服务分开部署**。同机时压测机抢 CPU，副本越多越被低估；分机部署步骤见 [../../docs/bench-deploy.md](../../docs/bench-deploy.md)；
+- 没有条件分机时，按 [../../docs/bench-deploy.md](../../docs/bench-deploy.md) 的「完全不想租服务器：本机基线」跑：
+  结果只能当这台机器的下限，并且跳过扩展效率（第 3 步）。2026-11-24 的实测见
+  [../../docs/capacity-baseline-report.md](../../docs/capacity-baseline-report.md)；
 - 被测环境带监控启动：`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml up -d --build`；
 - 不要叠加 `docker-compose.tracing.yml`（agent 有开销）；
 - 每轮压测时 Grafana 时间范围对准压测窗口，截图「容量」「JVM 与连接池」「Redis」「MySQL」「Kafka」几组面板存档。

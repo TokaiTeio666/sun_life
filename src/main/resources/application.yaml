@@ -8,6 +8,9 @@ server:
       min-spare: 20
     accept-count: 500
     max-connections: 8192
+    # Tomcat 默认每条 keep-alive 连接只处理 100 个请求，网关到 app 的连接会频繁重建；
+    # 本机基线 20k QPS 时 30s 产生约 6k 条连接，客户端临时端口被 TIME_WAIT 耗尽
+    max-keep-alive-requests: 100000
     # 暴露 tomcat.threads.busy 等 MBean 指标（容量评估需要看繁忙线程数）
     mbeanregistry:
       enabled: true

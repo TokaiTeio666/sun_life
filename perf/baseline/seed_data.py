@@ -60,6 +60,19 @@ VOUCHER_LIMIT = 999998       # 999999 是 component-bench.sh 的压测券
 ORDER_SEED_FLAG = 0x80000000  # 造数订单 id 的序列号最高位置 1，与 RedisIdWorker 生成的 id 永不冲突
 ALL_STEPS = ["user", "user_info", "shop", "voucher", "blog", "follow", "order", "redis-geo", "redis-feed"]
 
+# 造数与基线依赖的二级索引（migration_v2.sql）。旧数据卷可能只有主键：
+# 缺 idx_* 时读 SQL 会退化成全表扫描，缺 uk_user_follow 时关注步骤的 INSERT IGNORE 不会去重。
+# 只检查本次要跑的步骤对应的索引。
+REQUIRED_INDEXES = [
+    ("tb_blog", "idx_liked", "blog"),
+    ("tb_blog", "idx_user_id", "blog"),
+    ("tb_follow", "uk_user_follow", "follow"),
+    ("tb_follow", "idx_follow_user", "follow"),
+    ("tb_voucher_order", "idx_status_ctime", "order"),
+    ("tb_voucher_order", "idx_user_voucher", "order"),
+    ("tb_voucher", "idx_shop_id", "voucher"),
+]
+
 
 def env(name, default):
     return os.environ.get(name, default)
@@ -401,6 +414,17 @@ class Seeder:
             have = int(self.scalar(f"SELECT COUNT(*) FROM tb_voucher WHERE id BETWEEN {VOUCHER_BASE + 1} AND {VOUCHER_BASE + a.vouchers}") or 0)
             if have < a.vouchers:
                 log(f"[WARN] 订单会引用券 {VOUCHER_BASE + 1}–{VOUCHER_BASE + a.vouchers}，目前只有 {have:,} 张（没有外键，不影响写入）")
+        needed = [(t, i) for t, i, step in REQUIRED_INDEXES if step in a.steps]
+        if needed:
+            present = {tuple(line.split("\t")) for line in self.mysql(
+                "SELECT table_name, index_name FROM information_schema.statistics "
+                "WHERE table_schema = DATABASE();\n", with_prefix=False).splitlines() if line}
+            missing = [f"{t}.{i}" for t, i in needed if (t, i) not in present]
+            if missing:
+                die("缺少索引：" + ", ".join(missing) +
+                    "\n  旧数据卷先执行 migration_v2.sql：\n"
+                    "    docker exec -i -e MYSQL_PWD=<密码> hmdp-mysql mysql -uroot hmdp < src/main/resources/db/migration_v2.sql\n"
+                    "  缺少 uk_user_follow 时 INSERT IGNORE 不会去重，关注数据会出现重复行。")
 
     def tune(self):
         a = self.a
