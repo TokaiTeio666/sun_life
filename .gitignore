@@ -2,6 +2,7 @@ HELP.md
 target/
 __pycache__/
 *.pyc
+*.jfr
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
@@ -62,3 +63,8 @@ perf/baseline/results/**/run.jtl
 perf/baseline/results/**/report/
 perf/baseline/results/**/jmeter.log
 perf/baseline/capacity-model.json
+# 故障演练原始数据（HTML 报告与 jtl 很大），结论见 docs/stability-drills.md
+perf/baseline/results/drill-*.jtl
+perf/baseline/results/drill-*.log
+perf/baseline/results/drill-*-report/
+perf/baseline/results/drill-log.txt

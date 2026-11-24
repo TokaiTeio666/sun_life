@@ -1,0 +1,95 @@
+{
+  "kind": "knee",
+  "args": {
+    "cmd": "knee",
+    "jmx": "perf/seckill-bench.jmx",
+    "host": "127.0.0.1",
+    "port": "8081",
+    "duration": 30,
+    "token_file": "token.txt",
+    "jmeter": "jmeter",
+    "prop": null,
+    "slo_p99_ms": 100.0,
+    "max_error": 0.001,
+    "before_each": "bash perf/baseline/reset-seckill.sh",
+    "cooldown": 10,
+    "out": null,
+    "threads": "100,200,400,800",
+    "flat_gain": 0.05,
+    "keep_going": false
+  },
+  "rows": [
+    {
+      "qps": 14267.446944472471,
+      "samples": 424214,
+      "mean_ms": 6.871845342209403,
+      "p90_ms": 9.0,
+      "p95_ms": 10.0,
+      "p99_ms": 12.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "秒杀接口": {
+          "qps": 14267.446944472471,
+          "p99_ms": 12.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 100,
+      "verdict": "ok"
+    },
+    {
+      "qps": 14998.618644924363,
+      "samples": 445174,
+      "mean_ms": 13.13895240961982,
+      "p90_ms": 17.0,
+      "p95_ms": 18.0,
+      "p99_ms": 21.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "秒杀接口": {
+          "qps": 14998.618644924363,
+          "p99_ms": 21.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 200,
+      "verdict": "ok"
+    },
+    {
+      "qps": 15316.508795669824,
+      "samples": 452756,
+      "mean_ms": 25.789339070051515,
+      "p90_ms": 34.0,
+      "p95_ms": 38.0,
+      "p99_ms": 51.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "秒杀接口": {
+          "qps": 15316.508795669824,
+          "p99_ms": 51.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 400,
+      "verdict": "ok"
+    },
+    {
+      "qps": 14872.808200701376,
+      "samples": 441068,
+      "mean_ms": 52.93712080676859,
+      "p90_ms": 221.0,
+      "p95_ms": 620.0,
+      "p99_ms": 1313.0,
+      "error_ratio": 0.040374727000000006,
+      "per_api": {
+        "秒杀接口": {
+          "qps": 14872.808200701376,
+          "p99_ms": 1313.0,
+          "error_ratio": 0.040374727000000006
+        }
+      },
+      "threads": 800,
+      "verdict": "P99 1313ms > SLO 100ms"
+    }
+  ]
+}

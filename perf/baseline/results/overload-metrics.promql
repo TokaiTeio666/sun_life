@@ -1,0 +1,15 @@
+# 本文件由 sample_metrics.py 生成，记录每个 CSV 列的 PromQL
+qps	sum(rate(http_server_requests_seconds_count[30s]))
+p99_ms	1000 * histogram_quantile(0.99, sum(rate(http_server_requests_seconds_bucket[30s])) by (le))
+err_5xx	sum(rate(http_server_requests_seconds_count{status=~"5.."}[30s]))
+app_cpu	sum(rate(container_cpu_usage_seconds_total{name=~"sun_life-app-.*"}[30s]))
+redis_cpu	sum(rate(container_cpu_usage_seconds_total{name="hmdp-redis"}[30s]))
+mysql_cpu	sum(rate(container_cpu_usage_seconds_total{name="hmdp-mysql"}[30s]))
+kafka_cpu	sum(rate(container_cpu_usage_seconds_total{name="hmdp-kafka"}[30s]))
+hikari_pending	sum(hikaricp_connections_pending)
+hikari_active	sum(hikaricp_connections_active)
+mysql_threads_running	mysql_global_status_threads_running
+row_lock_waits_s	rate(mysql_global_status_innodb_row_lock_waits[30s])
+row_lock_avg_ms	rate(mysql_global_status_innodb_row_lock_time[30s]) / clamp_min(rate(mysql_global_status_innodb_row_lock_waits[30s]), 1)
+redis_cmds_s	rate(redis_commands_processed_total[30s])
+kafka_lag	sum(kafka_consumergroup_lag)

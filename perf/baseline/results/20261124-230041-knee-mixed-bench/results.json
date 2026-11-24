@@ -1,0 +1,47 @@
+{
+  "kind": "knee",
+  "args": {
+    "cmd": "knee",
+    "jmx": "perf/mixed-bench.jmx",
+    "host": "127.0.0.1",
+    "port": "8081",
+    "duration": 30,
+    "token_file": "token.txt",
+    "jmeter": "jmeter",
+    "prop": [
+      "SHOP_MAX=10000",
+      "PCT_SHOP=0",
+      "PCT_HOT=0",
+      "PCT_FEED=100",
+      "PCT_SECKILL=0"
+    ],
+    "slo_p99_ms": 100.0,
+    "max_error": 0.001,
+    "before_each": null,
+    "cooldown": 5,
+    "out": null,
+    "threads": "100",
+    "flat_gain": 0.05,
+    "keep_going": false
+  },
+  "rows": [
+    {
+      "qps": 7547.098769582464,
+      "samples": 224496,
+      "mean_ms": 12.142733055377695,
+      "p90_ms": 20.0,
+      "p95_ms": 22.0,
+      "p99_ms": 28.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "GET /blog/of/follow": {
+          "qps": 7547.098769582464,
+          "p99_ms": 28.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 100,
+      "verdict": "ok"
+    }
+  ]
+}

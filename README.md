@@ -215,10 +215,11 @@ sequenceDiagram
 
 ### 5.5 容量基线（阶段 3-1，本机受控基线）
 
-> 2026-11-24 实测，数据量 10 万用户 / 1 万店铺 / 100 万订单 / 5 万笔记 / 30 万关注（149 MB）。
-> **压测机 = 被测机**：服务跑在 WSL2（16 vCPU / 20 GB），JMeter 在 Windows 宿主，共享同一颗 CPU，
-> 数字只能当这台机器的下限；分机扩展效率未测。口径、逐级数据和瓶颈归因见
-> [docs/capacity-baseline-report.md](docs/capacity-baseline-report.md)。
+> 2026-11-24 实测（含当晚的 Redis 连接池修复，下表为**当前代码**），数据量 10 万用户 / 1 万店铺 /
+> 100 万订单 / 5 万笔记 / 30 万关注（149 MB）。**压测机 = 被测机**：服务跑在 WSL2（16 vCPU / 20 GB），
+> JMeter 在 Windows 宿主，共享同一颗 CPU，数字只能当这台机器的下限；分机扩展效率未测。
+> 口径、逐级数据、JFR 定位和瓶颈归因见 [docs/capacity-baseline-report.md](docs/capacity-baseline-report.md)
+> 第 9 节；故障演练见 [docs/stability-drills.md](docs/stability-drills.md)。
 
 组件上限（客户端同机，下限值）：
 
@@ -233,13 +234,18 @@ sequenceDiagram
 
 | 场景 | 拐点并发 / QPS | 安全容量（×60–70%） | 拐点时先到顶的 |
 | --- | ---: | ---: | --- |
-| 店铺详情 `/shop/{id}` | 200 / 25,438 | 15.3k–17.8k | 400 并发时服务端 P99 仅 14 ms，**压测端先到顶** |
-| 混合场景（店铺 70 / 笔记 15 / Feed 10 / 秒杀 5） | 100 / 14,977 | 9.0k–10.5k | 应用侧：`/blog/hot` P99 251 ms、Feed 335 ms |
-| 秒杀 `/voucher-order/seckill/21` | 100 / 17,361 | 10.4k–12.2k | 400 并发时服务端 P99 33 ms，**压测端先到顶** |
+| 店铺详情 `/shop/{id}` | 200 / 24,260 | 14.6k–17.0k | 400 并发服务端 P99 仍低，**压测端先到顶** |
+| 混合场景（店铺 70 / 笔记 15 / Feed 10 / 秒杀 5） | 100 / 16,460；200 并发 16,651 但 QPS 不再增长 | 9.9k–11.5k | **Hikari pending 21**：MySQL 连接池（30），MySQL CPU <1 核 |
+| 秒杀 `/voucher-order/seckill/21` | 200 / 14,999 | 9.0k–10.5k | 800 并发时 nginx 上游临时端口耗尽（`EADDRNOTAVAIL`） |
 
-- 测试区间内第一个饱和的不是 Redis / MySQL / Kafka，而是**应用侧处理与排队**；秒杀的硬上限是单券热点行写（批量聚合后约 2k 单/s）；
-- 顺带修掉两个真问题：旧数据卷缺 `migration_v2.sql` 索引（热门笔记 799 → 148,932 次/s）、
-  nginx 1.18 + Tomcat 默认每条连接只处理 100 个请求（20k QPS 下端口耗尽，出现 1.33% `BindException`）。
+- 当晚追加压测最大的发现：Redis 连接池 `max-idle: 20` 小于 `max-active: 50`，commons-pool2 **归还即销毁**，
+  实测 564 条新建连接/s、`GenericObjectPool.create()` 平均等锁 25 ms；调到 50/10 后
+  `/blog/hot` 5.8k → 11.9k QPS（P99 159 → 18 ms），混合 200 并发 P99 188 → 40 ms；
+- 修复后 Redis / MySQL 的 CPU 都不是瓶颈：混合 200 并发后卡在 `DB_POOL_MAX=30`，秒杀 800 并发卡在网关端口；
+- 顺带修掉另外两个问题：旧数据卷缺 `migration_v2.sql` 索引（热门笔记 799 → 148,932 次/s）、
+  nginx 1.18 + Tomcat 默认每条连接只处理 100 个请求（1.33% `BindException`）；
+- 秒杀的硬上限仍是单券热点行写（批量聚合后约 2k 单/s）；
+- 故障演练（杀副本 / Redis 重启 / Kafka 停机 / 过载）见 [docs/stability-drills.md](docs/stability-drills.md)。
 
 ### 5.6 结论（怎么向面试官讲）
 
@@ -357,7 +363,8 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 
 完整口径、重置脚本与实测数据见 [`perf/README.md`](perf/README.md)。
 容量基线（组件单测、单实例拐点、扩展效率、混合场景、容量模型）见 [`perf/baseline/README.md`](perf/baseline/README.md)；
-2026-11-24 的本机实测结果与瓶颈归因见 [`docs/capacity-baseline-report.md`](docs/capacity-baseline-report.md)。
+2026-11-24 的本机实测结果与瓶颈归因见 [`docs/capacity-baseline-report.md`](docs/capacity-baseline-report.md)；
+杀副本 / Redis 重启 / Kafka 停机 / 过载保护的演练记录见 [`docs/stability-drills.md`](docs/stability-drills.md)。
 
 ---
 

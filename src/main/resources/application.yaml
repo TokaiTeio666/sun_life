@@ -44,8 +44,11 @@ spring:
       lettuce:
         pool:
           max-active: 50
-          max-idle: 20
-          min-idle: 5
+          # max-idle 必须等于 max-active：commons-pool2 归还时若空闲数已达 max-idle 会直接销毁连接，
+          # 高并发下变成「借出 → 归还即销毁 → 下次再创建」。实测 564 次新建/s，
+          # GenericObjectPool.create() 的监视器锁平均等 25ms、P99 尾延迟被拖到 100ms 以上。
+          max-idle: 50
+          min-idle: 10
           max-wait: 2000ms
           time-between-eviction-runs: 10s
       timeout: 2000ms

@@ -1,0 +1,79 @@
+{
+  "kind": "knee",
+  "args": {
+    "cmd": "knee",
+    "jmx": "perf/shop-detail-bench.jmx",
+    "host": "127.0.0.1",
+    "port": "8081",
+    "duration": 30,
+    "token_file": null,
+    "jmeter": "jmeter",
+    "prop": [
+      "SHOP_MAX=10000"
+    ],
+    "slo_p99_ms": 100.0,
+    "max_error": 0.001,
+    "before_each": null,
+    "cooldown": 10,
+    "out": null,
+    "threads": "100,200,400,800",
+    "flat_gain": 0.05,
+    "keep_going": false
+  },
+  "rows": [
+    {
+      "qps": 22898.97740943724,
+      "samples": 685229,
+      "mean_ms": 4.27198352667498,
+      "p90_ms": 7.0,
+      "p95_ms": 8.0,
+      "p99_ms": 10.0,
+      "error_ratio": 7.7346405e-05,
+      "per_api": {
+        "商铺详情": {
+          "qps": 22898.97740943724,
+          "p99_ms": 10.0,
+          "error_ratio": 7.7346405e-05
+        }
+      },
+      "threads": 100,
+      "verdict": "ok"
+    },
+    {
+      "qps": 24260.443493093415,
+      "samples": 725363,
+      "mean_ms": 8.098520327063444,
+      "p90_ms": 14.0,
+      "p95_ms": 16.0,
+      "p99_ms": 20.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "商铺详情": {
+          "qps": 24260.443493093415,
+          "p99_ms": 20.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 200,
+      "verdict": "ok"
+    },
+    {
+      "qps": 23994.88174489011,
+      "samples": 717279,
+      "mean_ms": 16.371292063477966,
+      "p90_ms": 26.0,
+      "p95_ms": 40.0,
+      "p99_ms": 152.0,
+      "error_ratio": 0.0,
+      "per_api": {
+        "商铺详情": {
+          "qps": 23994.88174489011,
+          "p99_ms": 152.0,
+          "error_ratio": 0.0
+        }
+      },
+      "threads": 400,
+      "verdict": "P99 152ms > SLO 100ms"
+    }
+  ]
+}

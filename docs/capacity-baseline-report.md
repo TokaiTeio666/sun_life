@@ -4,6 +4,9 @@
 > 所有绝对数字只代表这台机器的**下限**，不能当作云端或线上容量承诺。
 > 扩展效率（第 3 步）在同机上没有意义，未测；分机基线有条件时按 [bench-deploy.md](bench-deploy.md) 补。
 > 对应 [phase3-architecture-plan.md](../plan/phase3-architecture-plan.md) 3-1.4；测法与工具见 [../perf/baseline/README.md](../perf/baseline/README.md)。
+>
+> **第 9 节是当晚的追加压测**：定位并修复了 Redis 连接池风暴，**9.4 节才是当前代码的拐点**；
+> 第 2–3 节保留修复前的数据用于对照。稳定性/故障演练见 [stability-drills.md](stability-drills.md)。
 
 ## 1. 环境与口径
 
@@ -231,3 +234,85 @@ D 的库存分段在目标单券峰值明确超过 2k/s 后再做。
 2. **nginx 1.18 的 `keepalive_requests` 默认是 100**（1.19 才改成 1000），Tomcat 默认也是 100：
    20k QPS 下大约每 5 ms 就重建一条连接，30 秒堆出约 6k 条连接 / 8874 个 TIME_WAIT，
    200 并发出现 1.33% 的 `BindException`。把两者都调到 100,000 后重跑，才得到第 3 节能用的拐点。
+
+## 9. 追加压测：拖尾定位与 Redis 连接池修复（2026-11-24 晚）
+
+### 9.1 现象
+
+按（当时的）混合场景拆分单接口后，问题暴露得很明显：
+
+| 场景（100 并发） | QPS | P99 | 应用 CPU | Redis / MySQL CPU |
+| --- | ---: | ---: | ---: | ---: |
+| `/blog/hot` 单独 | 5,824–5,883 | 143–159 ms | ~10 核 | Redis 0.4 / MySQL ~0 |
+| `/blog/of/follow` 单独 | 3,325–4,086 | 95–156 ms | ~10 核 | Redis 0.5 / MySQL ~1 |
+
+应用 CPU 被打满，但 Redis 和 MySQL 都很闲；混合场景 200 并发时
+`/blog/hot` P99 251 ms、`/blog/of/follow` 335 ms（服务端直方图也高，不是压测端）。
+
+### 9.2 定位（JFR + Redis 指标）
+
+对修复前的两个单接口压测做 JFR（139 秒，`settings=profile`）：
+
+| 证据 | 数字 |
+| --- | --- |
+| Lettuce 连接创建事件 | **99,711 次 / 139s**（约 717/s） |
+| Redis `total_connections_received` 速率 | **564/s**，但 `connected_clients` 只有 54 |
+| `GenericObjectPool.create()` 监视器竞争 | 约 8,500 次，平均等锁 24.7 ms，最大 136 ms |
+| 分配热点 | `byte[]` / `Object[]` / `ArrayList` 合计约 56%（含 Jackson 序列化与 MyBatis 映射）；Hutool `TableMap`/`AnnotationUtil`/`CombinationAnnotationElement` 合计 16.6%；虚拟线程 `StackChunk` 2.2% |
+| GC / 虚拟线程 | GC 开销 0.2%、最大暂停 31 ms；无 pinned virtual threads |
+
+根因：`spring.data.redis.lettuce.pool.max-idle: 20` 小于 `max-active: 50`。
+commons-pool2 在**归还连接时如果空闲数已达 `max-idle`，会直接销毁连接**；高并发下变成
+「借出 → 归还即销毁 → 下次再创建」，所有借还线程都串行在 `GenericObjectPool.create()` 的锁上。
+
+### 9.3 修复与 A/B
+
+```yaml
+spring.data.redis.lettuce.pool:
+  max-active: 50
+  max-idle: 50      # 之前是 20
+  min-idle: 10      # 之前是 5
+```
+
+| 场景 | 修复前 | 修复后 | 变化 |
+| --- | ---: | ---: | ---: |
+| `/blog/hot` 100 并发 | 5,824–5,883 QPS / P99 143–159 ms | **11,850 QPS / P99 18 ms** | QPS ×2，P99 −88% |
+| `/blog/of/follow` 100 并发 | 3,325–4,086 QPS / P99 95–156 ms | **7,547 QPS / P99 28 ms** | QPS ×1.8–2.3 |
+| 混合 200 并发 | 14,039 QPS / P99 188 ms | **16,651 QPS / P99 40 ms** | P99 −79% |
+| Redis 新建连接 | 约 22,560 条 / 40s | **55 条（hot）/ 15 条（feed）/ 40s** | ≈99.8% 下降 |
+
+结果目录：`perf/baseline/results/20261124-224913-*`（修复前 hot）、`20261124-225034-*`（修复前 feed）、
+`20261124-225950-*`（修复后 hot）、`20261124-230041-*`（修复后 feed）。
+
+### 9.4 修复后的拐点（当前代码）
+
+| 场景 | 各级结果（并发 / QPS / P99） | 拐点 | 安全容量 |
+| --- | --- | ---: | ---: |
+| 店铺详情 | 100 / 22,899 / 10 ms；200 / 24,260 / 20 ms；400 / 23,995 / 152 ms（客户端） | 200 / 24,260 | 14.6k–17.0k |
+| 混合场景 | 50 / 13,697 / 10 ms；100 / 16,460 / 18 ms；200 / 16,651 / 40 ms；400 / 17,156 / 106 ms | 100 / 16,460（200 起 QPS 不再增长） | 9.9k–11.5k |
+| 秒杀 | 100 / 14,267 / 12 ms；200 / 14,999 / 21 ms；400 / 15,317 / 51 ms；800 / 14,873 / 1,313 ms + 4.04% 502 | 200 / 14,999 | 9.0k–10.5k |
+
+结果目录：`20261124-230149-knee-shop-detail-bench`、`20261124-230441-knee-mixed-bench`、`20261124-230826-knee-seckill-bench`。
+
+- 店铺详情基本不受连接池影响（走本地一级缓存），数字与修复前同量级；
+- 混合场景的 QPS 在 200 并发后不再增长：**Hikari pending 最高 21**，而 MySQL CPU < 1 核——
+  瓶颈变成 `DB_POOL_MAX=30` 的连接池，而不是数据库本身；
+- 秒杀 800 并发的 4% 错误全部是 nginx 上游 `connect() failed (99: Address not available)`
+  （网关侧临时端口耗尽），应用日志无异常；把 `upstream keepalive 64` 调大或加副本可继续往上压。
+
+### 9.5 下一步
+
+| 优先级 | 项 | 依据 |
+| --- | --- | --- |
+| 1 | 验证 `DB_POOL_MAX=60`（MySQL `max_connections=300`，CPU 仍 <1 核） | 混合 200 并发 Hikari pending 21 |
+| 2 | 去掉 `BeanUtil.copyProperties`：热门笔记/Feed 每次请求复制 5 个 Blog，Hutool 注解反射占分配约 16.6% | JFR |
+| 3 | 列表接口用轻量 DTO（不带 `content`）或缓存序列化结果：hot 响应平均 9 KB、feed 3.7 KB | JMeter `bytes`，JFR 分配 |
+| 4 | nginx `upstream keepalive` 从 64 调大，或直接加副本 | 800 并发 `EADDRNOTAVAIL` |
+| 5 | Outbox / AOF 等可靠性项 | [stability-drills.md](stability-drills.md) |
+
+### 9.6 结论
+
+修复前混合场景的 188 ms 拖尾**主要不是业务逻辑慢，而是 Redis 连接池风暴**；修复后 200 并发 P99 降到 40 ms。
+Redis 连接池的经验规则：**`max-idle` 必须等于 `max-active`**，否则高并发下连接会被反复销毁重建。
+当前代码的第一个瓶颈已经转移到 MySQL 连接池和应用侧的对象分配/序列化；稳定性与故障演练见
+[stability-drills.md](stability-drills.md)。
