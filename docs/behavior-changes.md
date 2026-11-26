@@ -423,6 +423,10 @@ DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`OR
 | 点赞数回写（`LikeCountFlusher`） | `GREATEST(CAST(liked AS SIGNED) + ?, 0)` | `GREATEST(COALESCE(liked, 0) + ?, 0)`（PG 没有 `SIGNED` 类型）；迁移初期这里漏改，回写会整批报错，已修复并验证 |
 | 超时关单查询 | `.eq("status", 1)` | `.apply("status = 1")` 字面量，保证能用上部分索引（见 7.4） |
 | `tb_blog.liked` | 允许 NULL | `NOT NULL DEFAULT 0`：PG 的 `ORDER BY liked DESC` 把 NULL 排最前（MySQL 排最后），禁止 NULL 消除这个差异 |
+| JVM 时区 | URL 里 `serverTimezone=Asia/Shanghai` 固定 | `main` 里 `TimeZone.setDefault(Asia/Shanghai)`：pgjdbc 用 JVM 时区作会话时区，库里的默认时间与触发器随之固定为东八区，不再依赖宿主机 / 容器 TZ（已在 `TZ=UTC` 容器里验证） |
+| 商铺名搜索关键字 | `%`、`_` 被当通配符 | 先转义 `\ % _` 再 `ILIKE`，按字面匹配 |
+| 取消点赞（`hmdp.like.async-flush=false` 时） | `liked = liked - 1` | `liked = GREATEST(liked - 1, 0)`，DB 计数落后于 Redis 时不违反 `liked >= 0` |
+| 热门笔记排序 | `ORDER BY liked DESC` | 追加 `id DESC`，点赞数相同时翻页顺序稳定，不再重复 / 漏数据 |
 
 ### 7.2 约束：非法值直接报错
 

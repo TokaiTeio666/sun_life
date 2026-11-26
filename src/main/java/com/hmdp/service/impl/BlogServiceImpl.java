@@ -184,6 +184,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             int offset = (page - 1) * SystemConstants.MAX_PAGE_SIZE;
             records = listQuery()
                     .orderByDesc("liked")
+                    // 点赞数相同的笔记顺序不固定，分页会重复 / 漏掉；用 id 兜底保证翻页稳定
+                    .orderByDesc("id")
                     .last("LIMIT " + SystemConstants.MAX_PAGE_SIZE + " OFFSET " + offset)
                     .list();
             fillBlogUsers(records);
@@ -221,7 +223,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         boolean nowLiked = old != null && old == 0L;
         //2. 只有状态确实变化时才更新 DB 点赞数
         boolean isSuccess = update()
-                .setSql(nowLiked ? "liked = liked + 1" : "liked = liked - 1")
+                // 取消点赞最低减到 0：DB 计数可能落后于 Redis 位图（造数、回写延迟），直接减 1 会违反 CHECK (liked >= 0)
+                .setSql(nowLiked ? "liked = liked + 1" : "liked = GREATEST(liked - 1, 0)")
                 .eq("id", id)
                 .update();
         if (!isSuccess) {

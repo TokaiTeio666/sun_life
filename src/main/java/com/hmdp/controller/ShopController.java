@@ -74,10 +74,15 @@ public class ShopController {
         // 根据类型分页查询
         Page<Shop> page = shopService.query()
                 // ILIKE：PG 的 LIKE 区分大小写，沿用原 MySQL（utf8mb4_general_ci）不区分大小写的搜索行为
-                .apply(StrUtil.isNotBlank(name), "name ILIKE {0}", "%" + name + "%")
+                // 关键字里的 \ % _ 先转义，按字面匹配，不当通配符（PG LIKE 默认转义符是 \）
+                .apply(StrUtil.isNotBlank(name), "name ILIKE {0}", "%" + escapeLike(name) + "%")
                 .page(new Page<>(current, SystemConstants.MAX_PAGE_SIZE));
         // 返回数据
         return Result.ok(page.getRecords());
+    }
+
+    private static String escapeLike(String s) {
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
     }
 
     @GetMapping("/of/type")

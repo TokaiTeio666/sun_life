@@ -312,6 +312,8 @@ public class FeedService {
     /**
      * 先查本地缓存。不用 Cache.get(key, loader)：loader 在 ConcurrentHashMap.compute 的 synchronized 里执行，
      * 里面访问 Redis 会把虚拟线程钉在载体线程上；两个请求同时未命中时各查一次，结果相同，无害。
+     * <p>已知竞态（接受）：查 Redis 与 put 之间如果发生关注 / 取关，失效广播先到，put 会把旧结果写回本地缓存，
+     * 新关注的大 V 最多晚 {@code bigv-local-cache-seconds}（默认 5s）出现在 Feed 里。为这几秒加版本号不值得。</p>
      */
     private Set<String> cachedFollowedBigVs(Long userId) {
         if (followedBigVsCache == null) {
