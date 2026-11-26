@@ -9,15 +9,15 @@
 | --- | --- | --- |
 | 压测机 | 8 核 16 G | JMeter、`baseline.py`、造数与重置脚本 |
 | 应用机 | 16 核 32 G | app × N、nginx 网关、Prometheus、Grafana、三个 exporter、cAdvisor |
-| MySQL 机 | 8 核 16 G，SSD 云盘 200 G 以上 | mysql |
+| PostgreSQL 机 | 8 核 16 G，SSD 云盘 200 G 以上 | postgres |
 | 中间件机 | 8 核 16 G，SSD 云盘 | redis、kafka |
 
 - 四台机器在同一可用区，全部走内网 IP；选独享型实例，不要用突发性能型（CPU 积分用完会被限速）。
 - 监控放在应用机上：Prometheus 靠 compose 网络内的 DNS 发现 app 的所有副本，跨机器发现不了。
-  exporter 也在应用机上，远程连接 MySQL / Redis / Kafka。它们加起来占不到 1 核。
-- MySQL 机和中间件机的整机 CPU、磁盘 IO 没有接入 Prometheus，压测时用云厂商的主机监控或 `top` / `iostat` 看。
+  exporter 也在应用机上，远程连接 PostgreSQL / Redis / Kafka。它们加起来占不到 1 核。
+- PostgreSQL 机和中间件机的整机 CPU、磁盘 IO 没有接入 Prometheus，压测时用云厂商的主机监控或 `top` / `iostat` 看。
 
-> **安全**：Redis 没有密码，MySQL、Kafka、Prometheus 的端口都会监听在所有网卡上。
+> **安全**：Redis 没有密码，PostgreSQL、Kafka、Prometheus 的端口都会监听在所有网卡上。
 > 安全组只放行这四台机器所在的内网网段；需要从外面看 Grafana（3000）时只放行自己的 IP。
 
 ## 去哪租机器
@@ -26,7 +26,7 @@
 
 - 规格族选计算型（阿里云 c7 / c8 系列，腾讯云 S / SA 标准型或 C 计算型）：核数和内存 1:2，正好对应上表的 8 核 16 G 和 16 核 32 G。
 - 不要选突发性能型（阿里云 t5 / t6）和轻量应用服务器：前者 CPU 积分用完会限速，后者是共享资源且带宽受限。
-- 磁盘选 ESSD 或 SSD 云盘：MySQL 机 200 G 以上，其余 40–100 G 够用。
+- 磁盘选 ESSD 或 SSD 云盘：PostgreSQL 机 200 G 以上，其余 40–100 G 够用。
 - 公网只给压测机和应用机：按流量计费的小带宽即可，用来 SSH 和看 Grafana；另外两台从这两台跳过去。
 
 **费用量级**（粗略估算，未按当期报价核实，以控制台为准）：
@@ -40,7 +40,7 @@
 
 **省钱的做法**：
 
-- MySQL 机用按量付费，其余三台用抢占式：MySQL 上有灌好的 1000 万订单，被回收要重灌；另外三台重建成本低。
+- PostgreSQL 机用按量付费，其余三台用抢占式：PostgreSQL 上有灌好的 1000 万订单，被回收要重灌；另外三台重建成本低。
 - 中途休息时停机：阿里云按量实例支持「停机不收费」（只收磁盘钱），腾讯云有类似选项，过夜不用释放。
 - 先用小规格走通流程：第一次多机启动大概率要排错，可以先租四台 2 核 4 G 把部署和连通性跑通，再换成正式规格。
 - 测完立刻释放，并确认云盘和公网 IP 一起释放了，这两样会单独持续计费。
@@ -51,10 +51,10 @@
 
 | 变量 | 默认 | 作用 |
 | --- | --- | --- |
-| `APP_MYSQL_ADDR` / `APP_REDIS_HOST` / `APP_REDIS_PORT` / `APP_KAFKA_BOOTSTRAP` | `mysql:3306` / `redis` / `6379` / `kafka:9092` | app 和 exporter 连接的中间件地址 |
+| `APP_PG_ADDR` / `APP_REDIS_HOST` / `APP_REDIS_PORT` / `APP_KAFKA_BOOTSTRAP` | `postgres:5432` / `redis` / `6379` / `kafka:9092` | app 和 exporter 连接的中间件地址 |
 | `KAFKA_EXTERNAL_HOST` / `KAFKA_EXTERNAL_PORT` | `localhost` / `9094` | Kafka 给 compose 网络外的客户端用的对外地址 |
 | `APP_JAVA_OPTS` | `-Xms256m -Xmx512m ...` | app 的 JVM 参数 |
-| `MYSQL_MAX_CONNECTIONS` / `MYSQL_BUFFER_POOL` / `MYSQL_REDO_LOG` | `151` / `128M` / `100M` | MySQL 容量参数 |
+| `PG_MAX_CONNECTIONS` / `PG_SHARED_BUFFERS` / `PG_EFFECTIVE_CACHE_SIZE` / `PG_MAX_WAL_SIZE` | `100` / `128MB` / `4GB` / `1GB` | PostgreSQL 容量参数（`POSTGRES_PASSWORD` 为密码，宿主端口 `PG_PORT` 默认 5433） |
 | `APP_CPUS` | `2` | 每个 app 副本的 CPU 上限（只在 `docker-compose.bench-app.yml` 里生效） |
 
 Kafka 现在有两个监听器：compose 网络内的客户端仍然用 `kafka:9092`，网络外的客户端用 `<KAFKA_EXTERNAL_HOST>:9094`。
@@ -68,10 +68,10 @@ cp deploy/bench.env.example deploy/bench.env
 # 编辑 deploy/bench.env：换成实际的内网 IP 和密码
 ```
 
-**MySQL 机**（首次启动自动导入 `hmdp.sql`）：
+**PostgreSQL 机**（数据卷为空时首次启动自动导入 `hmdp.sql`）：
 
 ```bash
-docker compose --env-file deploy/bench.env -f deploy/docker-compose.yml up -d mysql
+docker compose --env-file deploy/bench.env -f deploy/docker-compose.yml up -d postgres
 ```
 
 **中间件机**：
@@ -97,14 +97,14 @@ docker compose $BENCH up -d --build --scale app=1
 curl http://localhost:8081/shop/1        # 返回店铺 JSON 即三台机器已连通
 ```
 
-`docker-compose.bench-app.yml` 让应用机不启动 mysql / redis / kafka，并给每个 app 副本加 CPU 上限。
+`docker-compose.bench-app.yml` 让应用机不启动 postgres / redis / kafka，并给每个 app 副本加 CPU 上限。
 
 ## 造数与压测（在压测机上）
 
 压测机需要 Docker、Python 3.12+、JDK 和 JMeter 5.5+。先把被测地址导出成环境变量，后面的脚本都认这一组：
 
 ```bash
-export NET=host MYSQL_HOST=10.0.0.11 MYSQL_PASSWORD=<密码> REDIS_HOST=10.0.0.12 KAFKA_BOOTSTRAP=10.0.0.12:9094
+export NET=host PG_HOST=10.0.0.11 PG_PORT=5432 PG_PASSWORD=<密码> REDIS_HOST=10.0.0.12 KAFKA_BOOTSTRAP=10.0.0.12:9094
 
 # 1. 造数（默认 100 万用户 / 10 万店铺 / 1000 万订单）并生成 5000 个登录 token
 #    在空库上一次灌到目标规模；分几次调大 --orders 补出来的订单分布与一次灌满的不同
@@ -139,12 +139,12 @@ python3 perf/baseline/baseline.py scale --jmx perf/mixed-bench.jmx --host 10.0.0
 docker compose $BENCH up -d --no-build --no-recreate --scale app=4 && docker compose $BENCH restart frontend
 ```
 
-副本数 × `DB_POOL_MAX` 要小于 `MYSQL_MAX_CONNECTIONS`；示例配置是 6 × 30 = 180，上限 500。
+副本数 × `DB_POOL_MAX` 要明显小于 `PG_MAX_CONNECTIONS`（PG 每个连接一个后端进程，连接多了内存和调度开销都上来）；示例配置是 6 × 30 = 180，上限 500。
 
 ## 预算有限：两台机器
 
 压测机 + 一台 16 核 32 G 的被测机。被测机直接用单机编排，只借用 `bench.env` 里的容量参数：
-把 `APP_*` 地址和 `KAFKA_EXTERNAL_HOST` 那几行删掉（回到容器服务名），`MYSQL_BUFFER_POOL` 改成 `6G`，然后
+把 `APP_*` 地址和 `KAFKA_EXTERNAL_HOST` 那几行删掉（回到容器服务名），`PG_SHARED_BUFFERS` 改成 `6GB`，然后
 
 ```bash
 docker compose --env-file deploy/bench.env -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml up -d --build
@@ -166,16 +166,13 @@ cp deploy/bench.local.env.example deploy/bench.local.env
 docker compose --env-file deploy/bench.local.env \
   -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml --profile resources up -d --build
 
-# 3. 旧数据卷先补索引：早期 hmdp.sql 没有 idx_*，漏了会让「热门笔记」退化成全表 filesort
-docker exec -i -e MYSQL_PWD=123456 hmdp-mysql mysql -uroot hmdp < src/main/resources/db/migration_v2.sql
-
-# 4. 1/10 规模造数（约 150 MB，几十秒），然后重启 app 让布隆过滤器预热
+# 3. 1/10 规模造数（约 150 MB，几十秒），然后重启 app 让布隆过滤器预热
 python perf/baseline/seed_data.py --users 100000 --shops 10000 --orders 1000000 \
-    --feed-users 10000 --buffer-pool-gb 4
+    --feed-users 10000
 docker compose --env-file deploy/bench.local.env -f deploy/docker-compose.yml restart app frontend
 
-# 5. 组件单测 + 单实例拐点
-bash perf/baseline/component-bench.sh redis mysql kafka
+# 4. 组件单测 + 单实例拐点
+bash perf/baseline/component-bench.sh redis pg kafka
 python perf/baseline/baseline.py knee --jmx perf/shop-detail-bench.jmx \
     --threads 50,100,200,400 --duration 30 --prop SHOP_MAX=10000
 python perf/baseline/baseline.py knee --jmx perf/mixed-bench.jmx --token-file token.txt \
@@ -187,7 +184,7 @@ python perf/baseline/baseline.py knee --jmx perf/mixed-bench.jmx --token-file to
 
 - **JMeter 在 Windows 宿主上跑**（如 `D:\apache-jmeter-5.6.3\bin`），不要放进 WSL，否则和被测服务抢同一个 cgroup；
 - 部署时如果 `auth.docker.io` 超时，可从镜像站拉基础镜像再打回原名，构建加 `--pull=false`；
-- `--buffer-pool-gb` 只改运行时值，MySQL 重启后退回启动参数；正式跑之前确认 `MYSQL_BUFFER_POOL` 生效；
+- `shared_buffers` 由启动参数 `PG_SHARED_BUFFERS` 决定（本机示例 4GB），改了要重启 postgres；`seed_data.py --shared-buffers-gb` 用 `ALTER SYSTEM` 改，同样要重启才生效；
 - 结果填进报告的「本机基线」一节，并注明「被测机 = 压测机」。
 
 ## 收尾与退租

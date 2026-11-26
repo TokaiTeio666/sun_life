@@ -42,16 +42,16 @@ def evaluate(m: dict, peak_override: float | None = None) -> dict:
         return raw * (1 - hit.get(key, 0.0))
 
     redis_ops = load("redis")
-    mysql_read = load("mysql_read")
-    mysql_write = load("mysql_write")
+    pg_read = load("pg_read")
+    pg_write = load("pg_write")
     kafka_msgs = load("kafka")
 
     app_n = ceil(peak_qps * red / (cap["app_safe_qps"] * cap["app_scale_efficiency"]))
     comps = [
         ("app 实例", peak_qps, cap["app_safe_qps"] * cap["app_scale_efficiency"], app_n, "加副本，线性扩展"),
         ("Redis 主节点", redis_ops, cap["redis_ops"], ceil(redis_ops * red / cap["redis_ops"]), "Cluster：N 主 ≈ N × 单节点"),
-        ("MySQL 主库（写）", mysql_write, cap["mysql_write_tps"], ceil(mysql_write * red / cap["mysql_write_tps"]), "分库后 ≈ 库数 × 单库"),
-        ("MySQL 从库（读）", mysql_read, cap["mysql_read_qps"], ceil(mysql_read * red / cap["mysql_read_qps"]), "加从库"),
+        ("PostgreSQL 主库（写）", pg_write, cap["pg_write_tps"], ceil(pg_write * red / cap["pg_write_tps"]), "分库后 ≈ 库数 × 单库"),
+        ("PostgreSQL 从库（读）", pg_read, cap["pg_read_qps"], ceil(pg_read * red / cap["pg_read_qps"]), "加从库"),
         ("Kafka 分区", kafka_msgs, cap["kafka_partition_msgs"], ceil(kafka_msgs * red / cap["kafka_partition_msgs"]), "瓶颈通常在消费端写库"),
     ]
 
@@ -62,10 +62,10 @@ def evaluate(m: dict, peak_override: float | None = None) -> dict:
             f"秒杀单券峰值 {sk:,.0f}/s 超过单 key Lua 上限 {cap['redis_lua_single_key']:,.0f}/s。"
             "单张券的 key 只在一个分片上，加 Redis 节点无效：需要售罄本地标记、库存分段（3-2 批次 B / D）。")
     conns = app_n * cap["db_pool_per_app"]
-    if conns > cap["mysql_max_connections"] * 0.8:
+    if conns > cap["pg_max_connections"] * 0.8:
         warnings.append(
-            f"{app_n} 个 app × 连接池 {cap['db_pool_per_app']} = {conns} 个连接，超过 MySQL max_connections "
-            f"{cap['mysql_max_connections']} 的 80%：调大 max_connections、调小 DB_POOL_MAX，或读写分离分摊。")
+            f"{app_n} 个 app × 连接池 {cap['db_pool_per_app']} = {conns} 个连接，超过 PostgreSQL max_connections "
+            f"{cap['pg_max_connections']} 的 80%：调大 max_connections、调小 DB_POOL_MAX，或读写分离分摊。")
     redis_nodes = comps[1][3]
     if redis_nodes > 1:
         token_ops = peak_qps * (1 - hit.get("redis", 0.0))

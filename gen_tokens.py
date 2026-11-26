@@ -7,6 +7,9 @@
      TTL 默认 36000 分钟（25 天，与 RedisConstants.LOGIN_USER_TTL 一致，每次请求还会自动续期）
   4. 输出 token.txt：每行 "token,userId"（逗号分隔，无表头），供 JMeter CSV Data Set Config 使用
 
+依赖：pip install "psycopg[binary]" redis（建议装进 .venv-token）
+数据库连接可用环境变量覆盖：PG_HOST / PG_PORT（默认 127.0.0.1:5433）/ PG_USER / PG_PASSWORD / PG_DB
+
 用法（在项目根目录执行）：
   .venv-token\\Scripts\\python gen_tokens.py                  # 默认 1000 个
   .venv-token\\Scripts\\python gen_tokens.py --count 500     # 指定数量
@@ -17,13 +20,15 @@ import argparse
 import os
 import uuid
 
-import pymysql
+import psycopg
 import redis
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-DB = dict(host='127.0.0.1', port=3306, user='root', password='123456',
-          database='hmdp', charset='utf8mb4')
+# 默认连 compose 暴露的 PostgreSQL（宿主机端口 5433）；可用环境变量覆盖
+DB = dict(host=os.environ.get('PG_HOST', '127.0.0.1'), port=int(os.environ.get('PG_PORT', '5433')),
+          user=os.environ.get('PG_USER', 'postgres'), password=os.environ.get('PG_PASSWORD', '123456'),
+          dbname=os.environ.get('PG_DB', 'hmdp'))
 REDIS = dict(host='127.0.0.1', port=6379, db=0, protocol=2)
 LOGIN_USER_KEY = "login:token:"
 LOGIN_USER_TTL = 36000  # 分钟，与项目 RedisConstants.LOGIN_USER_TTL 一致
@@ -38,12 +43,9 @@ def main():
     args = ap.parse_args()
 
     # 1. 从数据库取用户
-    conn = pymysql.connect(**DB)
-    cur = conn.cursor()
-    cur.execute("SELECT id, nick_name, icon FROM tb_user ORDER BY id LIMIT %s", (args.count,))
-    users = cur.fetchall()
-    cur.close()
-    conn.close()
+    with psycopg.connect(**DB) as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, nick_name, icon FROM tb_user ORDER BY id LIMIT %s", (args.count,))
+        users = cur.fetchall()
     if not users:
         print("[ERROR] tb_user 表为空，无法生成 token")
         return

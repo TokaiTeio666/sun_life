@@ -9,7 +9,7 @@ import org.springframework.context.annotation.Configuration;
 /**
  * 虚拟线程（JDK 21）：只让 Tomcat 的请求处理线程使用虚拟线程。
  *
- * <p>每个请求一个虚拟线程，阻塞在 Redis / MySQL 上时让出平台线程，并发不再受
+ * <p>每个请求一个虚拟线程，阻塞在 Redis / PostgreSQL 上时让出平台线程，并发不再受
  * {@code server.tomcat.threads.max} 限制，实际上限变成下游连接池（Hikari、Lettuce）。</p>
  *
  * <p><b>为什么不用 {@code spring.threads.virtual.enabled=true}</b>：那个开关会把 Kafka 监听容器和
@@ -18,8 +18,8 @@ import org.springframework.context.annotation.Configuration;
  * 实测 2 核容器里 3 个消费者就把平台线程占满，请求得不到调度，应用不再响应。
  * 所以消费者和定时任务保持原来的平台线程，这里只切换请求线程。</p>
  *
- * <p>同样的原因，MySQL 驱动要用 9.x（内部的 synchronized 已换成 ReentrantLock，见 pom.xml 的
- * {@code mysql.version}）；8.x 每次查询都会钉住平台线程。</p>
+ * <p>同样的原因，PostgreSQL 驱动要用 42.6 及以上（内部的 synchronized 已换成锁，Spring Boot 3.3
+ * 管理的版本是 42.7.x）；更早的版本每次查询都会钉住平台线程。</p>
  *
  * <p>回退 / A/B 对比：{@code VIRTUAL_THREADS=false}。</p>
  */

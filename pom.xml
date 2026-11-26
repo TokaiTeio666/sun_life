@@ -15,9 +15,6 @@
     <description>sun_life backend — Spring Boot local-life service (Redis + Kafka)</description>
     <properties>
         <java.version>21</java.version>
-        <!-- 覆盖 Spring Boot 管理的 8.3.0：Connector/J 9.x 把内部的 synchronized 换成了 ReentrantLock，
-             虚拟线程执行 SQL 时不再钉住平台线程（见 VirtualThreadConfig） -->
-        <mysql.version>9.1.0</mysql.version>
     </properties>
     <dependencies>
         <dependency>
@@ -34,8 +31,10 @@
         </dependency>
 
         <dependency>
-            <groupId>com.mysql</groupId>
-            <artifactId>mysql-connector-j</artifactId>
+            <!-- 版本由 Spring Boot 管理（42.7.x）：42.6 起驱动内部用锁代替 synchronized，
+                 虚拟线程执行 SQL 时不会钉住平台线程（见 VirtualThreadConfig） -->
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
             <scope>runtime</scope>
         </dependency>
         <dependency>

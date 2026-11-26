@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # =====================================================================
-# 组件单测（阶段 3-1.2 第 1 步）：分别测出 Redis / MySQL / Kafka 各自的上限
+# 组件单测（阶段 3-1.2 第 1 步）：分别测出 Redis / PostgreSQL / Kafka 各自的上限
 #
 # 用法（在能访问被测组件的机器上执行，Git Bash / Linux / macOS 均可）：
 #   bash perf/baseline/component-bench.sh              # 全部
-#   bash perf/baseline/component-bench.sh redis mysql  # 只测部分组件
+#   bash perf/baseline/component-bench.sh redis pg     # 只测部分组件
 #
 # 压测客户端以一次性容器运行（docker run --rm），通过 compose 网络访问被测组件。
 # 被测组件在另一台机器时，改用 --network host 并把 *_HOST 指向那台机器：
-#   NET=host REDIS_HOST=10.0.0.5 REDIS_PORT=6380 MYSQL_HOST=10.0.0.5 MYSQL_PORT=3307 \
+#   NET=host REDIS_HOST=10.0.0.5 REDIS_PORT=6380 PG_HOST=10.0.0.5 PG_PORT=5433 \
 #   KAFKA_BOOTSTRAP=10.0.0.5:9094 bash perf/baseline/component-bench.sh
 # 注意：客户端与被测组件同机时会抢 CPU，结果偏低，只能作为下限参考。
 #
 # 所有测试数据都写在独立的 key / 表 / topic 里，结束后清理，不影响业务数据：
-#   Redis: bench:* 与 seckill:*:999999；MySQL: 券 999999 + bench_voucher_order 表；Kafka: bench.perf
+#   Redis: bench:* 与 seckill:*:999999；PostgreSQL: 券 999999 + bench_voucher_order 表；Kafka: bench.perf
 # =====================================================================
 set -euo pipefail
 export MSYS_NO_PATHCONV=1   # Git Bash 下不要把 /opt/... 参数改写成 Windows 路径
@@ -21,21 +21,17 @@ export MSYS_NO_PATHCONV=1   # Git Bash 下不要把 /opt/... 参数改写成 Win
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 NET="${NET:-sun_life_default}"
 REDIS_IMAGE="${REDIS_IMAGE:-redis:7.2}"
-MYSQL_IMAGE="${MYSQL_IMAGE:-mysql:8.0}"
-SYSBENCH_IMAGE="${SYSBENCH_IMAGE:-severalnines/sysbench}"
+PG_IMAGE="${PG_IMAGE:-postgres:16.4}"   # psql 与 pgbench 都用这个镜像，版本与被测库一致
 KAFKA_IMAGE="${KAFKA_IMAGE:-apache/kafka:3.7.0}"
 REDIS_HOST="${REDIS_HOST:-redis}";   REDIS_PORT="${REDIS_PORT:-6379}"
-MYSQL_HOST="${MYSQL_HOST:-mysql}";   MYSQL_PORT="${MYSQL_PORT:-3306}"
-MYSQL_USER="${MYSQL_USER:-root}";    MYSQL_PASSWORD="${MYSQL_PASSWORD:-123456}"; MYSQL_DB="${MYSQL_DB:-hmdp}"
-# sysbench 1.0 自带的 MariaDB 客户端不支持 MySQL 8 默认的 caching_sha2_password，
-# 脚本用上面的管理员账号临时建一个 mysql_native_password 的压测账号，结束后删除
-BENCH_USER="${BENCH_USER:-bench}";   BENCH_PASSWORD="${BENCH_PASSWORD:-bench123}"
+PG_HOST="${PG_HOST:-postgres}";      PG_PORT="${PG_PORT:-5432}"
+PG_USER="${PG_USER:-postgres}";      PG_PASSWORD="${PG_PASSWORD:-123456}"; PG_DB="${PG_DB:-hmdp}"
 KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-kafka:9092}"
 
 REDIS_N="${REDIS_N:-200000}"           # 每项请求数
 REDIS_CLIENTS="${REDIS_CLIENTS:-50}"   # 并发连接
-MYSQL_CONCURRENCY="${MYSQL_CONCURRENCY:-50}"
-MYSQL_TIME="${MYSQL_TIME:-30}"                 # 每条 SQL 压测秒数
+PG_CONCURRENCY="${PG_CONCURRENCY:-50}"
+PG_TIME="${PG_TIME:-30}"                       # 每条 SQL 压测秒数
 KAFKA_RECORDS="${KAFKA_RECORDS:-1000000}"
 KAFKA_RECORD_SIZE="${KAFKA_RECORD_SIZE:-200}"   # 秒杀订单消息约 80–100 字节，留余量
 
@@ -50,16 +46,21 @@ md()  { echo "$*" >> "$REPORT"; }
 redis_cli()   { docker run --rm -i --network "$NET" "$REDIS_IMAGE" redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" "$@"; }
 redis_bench() { docker run --rm --network "$NET" "$REDIS_IMAGE" redis-benchmark -h "$REDIS_HOST" -p "$REDIS_PORT" \
                   -n "$REDIS_N" -c "$REDIS_CLIENTS" --csv "$@"; }
-mysql_exec()  { docker run --rm -i --network "$NET" -e MYSQL_PWD="$MYSQL_PASSWORD" "$MYSQL_IMAGE" \
-                  mysql -h "$MYSQL_HOST" -P "$MYSQL_PORT" -u"$MYSQL_USER" "$MYSQL_DB" "$@"; }
-# sysbench 通用参数；脚本经 stdin 写进容器，不依赖宿主机目录挂载（Windows 路径含中文时更稳）
-sysbench_run() {
+pg_exec()     { docker run --rm -i --network "$NET" -e PGPASSWORD="$PG_PASSWORD" "$PG_IMAGE" \
+                  psql -v ON_ERROR_STOP=1 -X -q -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "${DB_OVERRIDE:-$PG_DB}" "$@"; }
+# pgbench 压一条业务 SQL：脚本经环境变量写进容器（不依赖宿主机目录挂载，Windows 路径含中文时更稳）。
+# -M prepared 与应用的 JDBC 预编译语句一致；--log 记录每个事务的耗时，容器内用 sort/awk 算 P95
+# （pgbench 自带报告只有平均延迟）。-j 取 min(并发, CPU 核数)。
+pgbench_run() {
   local sql="$1" threads="$2"
-  docker run --rm -i --network "$NET" -e BENCH_SQL="$sql" "$SYSBENCH_IMAGE" \
-    sh -c 'cat > /tmp/b.lua && sysbench /tmp/b.lua "$@"' _ \
-    --db-driver=mysql --mysql-host="$MYSQL_HOST" --mysql-port="$MYSQL_PORT" --mysql-user="$BENCH_USER" \
-    --mysql-password="$BENCH_PASSWORD" --mysql-db="$MYSQL_DB" --threads="$threads" --time="$MYSQL_TIME" \
-    --percentile=95 run < "$ROOT/perf/baseline/sql-bench.lua"
+  docker run --rm --network "$NET" -e BENCH_SQL="$sql" -e PGPASSWORD="$PG_PASSWORD" "$PG_IMAGE" sh -c '
+    printf "%s\n" "$BENCH_SQL" > /tmp/b.sql
+    j=$(nproc); [ "$j" -gt "$1" ] && j=$1
+    pgbench -n -M prepared -f /tmp/b.sql -c "$1" -j "$j" -T "$2" --log --log-prefix=/tmp/pgb \
+      -h "$3" -p "$4" -U "$5" "$6" || exit 1
+    cat /tmp/pgb.* | awk "{print \$3}" | sort -n \
+      | awk "{a[NR]=\$1} END{i=int(NR*0.95); if(i<1)i=1; if(NR>0) printf \"95th percentile: %.3f\n\", a[i]/1000}"
+  ' _ "$threads" "$PG_TIME" "$PG_HOST" "$PG_PORT" "$PG_USER" "$PG_DB"
 }
 kafka_bin()   { docker run --rm --network "$NET" "$KAFKA_IMAGE" "/opt/kafka/bin/$1" "${@:2}"; }
 
@@ -105,82 +106,80 @@ bench_redis() {
   md ""
 }
 
-# sysbench 输出 "transactions: N (X per sec.)" 与 "95th percentile: Y"
-mysql_row() {
-  local label="$1" query="$2" threads="${3:-$MYSQL_CONCURRENCY}"
+# pgbench 输出 "tps = X (...)"、"latency average = Y ms" 与上面追加的 "95th percentile: Z"
+pg_row() {
+  local label="$1" query="$2" threads="${3:-$PG_CONCURRENCY}"
   local out tps p95 avg
-  out=$(sysbench_run "$query" "$threads")
-  tps=$(echo "$out" | sed -n 's/.*transactions:.*(\([0-9.]*\) per sec.*/\1/p')
-  avg=$(echo "$out" | sed -n 's/^ *avg: *\([0-9.]*\).*/\1/p')
-  p95=$(echo "$out" | sed -n 's/.*95th percentile: *\([0-9.]*\).*/\1/p')
+  out=$(pgbench_run "$query" "$threads")
+  tps=$(echo "$out" | sed -n 's/^tps = \([0-9.]*\).*/\1/p')
+  avg=$(echo "$out" | sed -n 's/^latency average = *\([0-9.]*\).*/\1/p')
+  p95=$(echo "$out" | sed -n 's/^95th percentile: *\([0-9.]*\).*/\1/p')
   md "| $label | $threads | ${tps%.*} | $avg | $p95 |"
   log "  $label: ${tps%.*} /s, p95 ${p95}ms"
 }
 
-bench_mysql() {
-  log "MySQL @ $MYSQL_HOST:$MYSQL_PORT（threads=$MYSQL_CONCURRENCY, 每条 ${MYSQL_TIME}s）"
-  md "## MySQL（$MYSQL_HOST:$MYSQL_PORT，sysbench 执行业务真实 SQL，每条 ${MYSQL_TIME}s）"
+bench_pg() {
+  log "PostgreSQL @ $PG_HOST:$PG_PORT（clients=$PG_CONCURRENCY, 每条 ${PG_TIME}s）"
+  md "## PostgreSQL（$PG_HOST:$PG_PORT，pgbench 执行业务真实 SQL，每条 ${PG_TIME}s）"
   md ""
   md "| SQL | 并发 | 每秒执行 | 平均 ms | P95 ms |"
   md "| --- | ---: | ---: | ---: | ---: |"
 
   # 压测券 end_time 设为两天前：应用的库存预热和对账采样都不会扫到它
-  mysql_exec <<SQL
+  # bench_voucher_order 复制订单表的列、默认值与索引（含部分索引 idx_..._unpaid_ctime）；id 用序列生成
+  pg_exec <<SQL
 DELETE FROM tb_seckill_voucher WHERE voucher_id = $BENCH_VOUCHER;
 INSERT INTO tb_seckill_voucher (voucher_id, stock, begin_time, end_time)
-  VALUES ($BENCH_VOUCHER, 1000000000, NOW() - INTERVAL 3 DAY, NOW() - INTERVAL 2 DAY);
+  VALUES ($BENCH_VOUCHER, 1000000000, now() - interval '3 days', now() - interval '2 days');
 DROP TABLE IF EXISTS bench_voucher_order;
-CREATE TABLE bench_voucher_order LIKE tb_voucher_order;
-DROP USER IF EXISTS '$BENCH_USER'@'%';
-CREATE USER '$BENCH_USER'@'%' IDENTIFIED WITH mysql_native_password BY '$BENCH_PASSWORD';
-GRANT SELECT, INSERT, UPDATE, DELETE ON $MYSQL_DB.* TO '$BENCH_USER'@'%';
-GRANT ALL ON sbtest.* TO '$BENCH_USER'@'%';
+CREATE TABLE bench_voucher_order (LIKE tb_voucher_order INCLUDING ALL);
+DROP SEQUENCE IF EXISTS bench_id_seq;
+CREATE SEQUENCE bench_id_seq;
 SQL
 
   local values="" i
-  for i in $(seq 1 24); do values+="${values:+,}(UUID_SHORT(), $i, $BENCH_VOUCHER, 1)"; done
+  for i in $(seq 1 24); do values+="${values:+,}(nextval('bench_id_seq'), $i, $BENCH_VOUCHER, 1)"; done
 
-  mysql_row "主键点查（店铺详情回源）" "SELECT * FROM tb_shop WHERE id = 1"
-  mysql_row "热门笔记（ORDER BY liked）" "SELECT id, user_id, title, liked FROM tb_blog ORDER BY liked DESC LIMIT 10"
-  mysql_row "超时关单扫描（idx_status_ctime）" \
-    "SELECT id, user_id, voucher_id FROM tb_voucher_order WHERE status = 1 AND create_time < NOW() - INTERVAL 30 MINUTE ORDER BY create_time LIMIT 500"
-  mysql_row "热点行扣库存 stock = stock - 1" \
+  pg_row "主键点查（店铺详情回源）" "SELECT * FROM tb_shop WHERE id = 1"
+  pg_row "热门笔记（ORDER BY liked）" "SELECT id, user_id, title, liked FROM tb_blog ORDER BY liked DESC LIMIT 10"
+  pg_row "超时关单扫描（部分索引 WHERE status = 1）" \
+    "SELECT id, user_id, voucher_id FROM tb_voucher_order WHERE status = 1 AND create_time < now() - interval '30 minutes' ORDER BY create_time LIMIT 500"
+  pg_row "热点行扣库存 stock = stock - 1" \
     "UPDATE tb_seckill_voucher SET stock = stock - 1 WHERE voucher_id = $BENCH_VOUCHER AND stock >= 1"
-  mysql_row "热点行扣库存 stock = stock - 24（批量聚合）" \
+  pg_row "热点行扣库存 stock = stock - 24（批量聚合）" \
     "UPDATE tb_seckill_voucher SET stock = stock - 24 WHERE voucher_id = $BENCH_VOUCHER AND stock >= 24"
-  mysql_row "多值 INSERT 24 行" "INSERT INTO bench_voucher_order (id, user_id, voucher_id, status) VALUES $values"
+  pg_row "多值 INSERT 24 行" "INSERT INTO bench_voucher_order (id, user_id, voucher_id, status) VALUES $values"
 
-  mysql_exec <<SQL
+  pg_exec <<SQL
 DELETE FROM tb_seckill_voucher WHERE voucher_id = $BENCH_VOUCHER;
 DROP TABLE IF EXISTS bench_voucher_order;
+DROP SEQUENCE IF EXISTS bench_id_seq;
 SQL
   md ""
   md "> 热点行的两行对比即「批量聚合」的收益：每秒能执行的 UPDATE 次数接近，但每次扣 24 单。"
   md ""
-  if [[ "${SYSBENCH:-0}" == "1" ]]; then bench_sysbench; fi
-  mysql_exec -e "DROP USER IF EXISTS '$BENCH_USER'@'%'"
+  if [[ "${PGBENCH_STD:-0}" == "1" ]]; then bench_pgbench_std; fi
 }
 
-# 可选：sysbench 通用基准（SYSBENCH=1 开启），使用独立库 sbtest
-bench_sysbench() {
-  local img="$SYSBENCH_IMAGE"
-  local args=(--db-driver=mysql --mysql-host="$MYSQL_HOST" --mysql-port="$MYSQL_PORT" --mysql-user="$BENCH_USER"
-              --mysql-password="$BENCH_PASSWORD" --mysql-db=sbtest --tables=8 --table-size=100000
-              --threads="$MYSQL_CONCURRENCY" --time=60 --report-interval=0)
-  mysql_exec -e "CREATE DATABASE IF NOT EXISTS sbtest"
-  docker run --rm --network "$NET" "$img" sysbench oltp_read_write "${args[@]}" prepare >/dev/null
-  md "## sysbench（8 表 × 10 万行，threads=$MYSQL_CONCURRENCY，60s）"
+# 可选：pgbench 自带的通用基准（PGBENCH_STD=1 开启），使用独立库 pgbench_std，结束后删除
+bench_pgbench_std() {
+  local run=(docker run --rm --network "$NET" -e PGPASSWORD="$PG_PASSWORD" "$PG_IMAGE" pgbench
+             -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -c "$PG_CONCURRENCY" -j 4)
+  DB_OVERRIDE=postgres pg_exec -c "DROP DATABASE IF EXISTS pgbench_std" -c "CREATE DATABASE pgbench_std"
+  "${run[@]}" -i -s 10 pgbench_std >/dev/null 2>&1
+  md "## pgbench 通用基准（scale=10 约 100 万行，clients=$PG_CONCURRENCY，60s）"
   md ""
   md '```'
-  for t in oltp_point_select oltp_write_only; do
-    log "  sysbench $t"
-    docker run --rm --network "$NET" "$img" sysbench "$t" "${args[@]}" run \
-      | grep -E 'queries:|transactions:|95th percentile' | sed "s/^/$t /" >> "$REPORT"
+  local name flag
+  for name in tpcb-like select-only; do
+    log "  pgbench $name"
+    flag=(-b "$name")
+    "${run[@]}" "${flag[@]}" -T 60 pgbench_std 2>&1 \
+      | grep -E '^tps|latency average|number of transactions actually' | sed "s/^/$name /" >> "$REPORT"
   done
   md '```'
   md ""
-  docker run --rm --network "$NET" "$img" sysbench oltp_read_write "${args[@]}" cleanup >/dev/null
-  mysql_exec -e "DROP DATABASE IF EXISTS sbtest"
+  DB_OVERRIDE=postgres pg_exec -c "DROP DATABASE IF EXISTS pgbench_std"
 }
 
 bench_kafka() {
@@ -217,13 +216,13 @@ bench_kafka() {
 } > "$REPORT"
 
 targets=("$@")
-[[ ${#targets[@]} -eq 0 ]] && targets=(redis mysql kafka)
+[[ ${#targets[@]} -eq 0 ]] && targets=(redis pg kafka)
 for t in "${targets[@]}"; do
   case "$t" in
     redis) bench_redis ;;
-    mysql) bench_mysql ;;
+    pg|postgres) bench_pg ;;
     kafka) bench_kafka ;;
-    *) echo "未知组件: $t（可选 redis / mysql / kafka）" >&2; exit 1 ;;
+    *) echo "未知组件: $t（可选 redis / pg / kafka）" >&2; exit 1 ;;
   esac
 done
 log "结果：$REPORT"

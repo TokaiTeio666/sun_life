@@ -48,9 +48,9 @@ public class LikeCountFlusher {
             "redis.call('rename', KEYS[1], KEYS[2]) " +
             "return 1", Long.class);
 
-    /** liked 是无符号列：先转成有符号再加，取消点赞多于点赞时最低减到 0，不会溢出报错 */
+    /** liked 有 CHECK (liked >= 0)：取消点赞多于点赞时最低减到 0，不会违反约束；NULL 按 0 算 */
     private static final String UPDATE_SQL =
-            "UPDATE tb_blog SET liked = GREATEST(CAST(liked AS SIGNED) + ?, 0) WHERE id = ?";
+            "UPDATE tb_blog SET liked = GREATEST(COALESCE(liked, 0) + ?, 0) WHERE id = ?";
 
     @Resource
     private StringRedisTemplate stringRedisTemplate;

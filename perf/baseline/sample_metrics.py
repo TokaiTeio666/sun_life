@@ -10,7 +10,7 @@
   python perf/baseline/sample_metrics.py --duration 600 --out perf/baseline/results/metrics.csv
   # 另一个终端跑 baseline.py knee / scale
 
-列：时间、接口 QPS / P99 / 5xx、各容器 CPU、Hikari pending、MySQL 线程与行锁等待、Redis 命令数。
+列：时间、接口 QPS / P99 / 5xx、各容器 CPU、Hikari pending、PostgreSQL 活跃会话与锁等待、Redis 命令数。
 只用标准库，需要 Python 3.8+。
 """
 import argparse
@@ -32,15 +32,18 @@ QUERIES = {
     # 应用与共享组件的 CPU（单位：核）
     "app_cpu": 'sum(rate(container_cpu_usage_seconds_total{name=~"sun_life-app-.*"}[30s]))',
     "redis_cpu": 'sum(rate(container_cpu_usage_seconds_total{name="hmdp-redis"}[30s]))',
-    "mysql_cpu": 'sum(rate(container_cpu_usage_seconds_total{name="hmdp-mysql"}[30s]))',
+    "pg_cpu": 'sum(rate(container_cpu_usage_seconds_total{name="hmdp-postgres"}[30s]))',
     "kafka_cpu": 'sum(rate(container_cpu_usage_seconds_total{name="hmdp-kafka"}[30s]))',
     # 应用侧的排队信号：Hikari 等连接数（虚拟线程下看这个，不看 tomcat 线程）
     "hikari_pending": "sum(hikaricp_connections_pending)",
     "hikari_active": "sum(hikaricp_connections_active)",
-    # MySQL：并发线程与热点行锁等待速率
-    "mysql_threads_running": "mysql_global_status_threads_running",
-    "row_lock_waits_s": "rate(mysql_global_status_innodb_row_lock_waits[30s])",
-    "row_lock_avg_ms": "rate(mysql_global_status_innodb_row_lock_time[30s]) / clamp_min(rate(mysql_global_status_innodb_row_lock_waits[30s]), 1)",
+    # PostgreSQL（postgres-exporter）：活跃会话、正在等锁的会话数（热点行锁）、事务提交速率、死锁速率
+    "pg_active_sessions": "sum(pg_activity_active_backends)",
+    "pg_idle_in_tx": "sum(pg_activity_idle_in_transaction_backends)",
+    "pg_lock_waiting": "sum(pg_lock_waiting_sessions)",
+    "pg_commits_s": 'sum(rate(pg_stat_database_xact_commit{datname="hmdp"}[30s]))',
+    "pg_deadlocks_s": 'sum(rate(pg_stat_database_deadlocks{datname="hmdp"}[30s]))',
+    "pg_backends": 'sum(pg_stat_database_numbackends{datname="hmdp"})',
     # Redis：命令速率
     "redis_cmds_s": "rate(redis_commands_processed_total[30s])",
     # Kafka 消费 lag（没有消息时该序列不存在，记为 0）

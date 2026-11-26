@@ -3,6 +3,9 @@
 按用户量 / QPS 逐级演进，每一级先把当前架构用到极限再升级，避免过早引入复杂度。
 阶段 0–2 已在本仓库落地，阶段 3 为方案。
 
+> 2026-11 数据库已由 MySQL 8 迁移到 PostgreSQL 16（见 [behavior-changes.md](behavior-changes.md)）。下文阶段 0–2 的描述保留当时 MySQL 的说法，
+> 索引与连接数约束以 PG 版 `db/hmdp.sql` 和 `max_connections`（默认 100）为准。
+
 | 阶段 | 规模（参考） | 核心思路 | 状态 |
 | --- | --- | --- | --- |
 | 0 | — | 先修正确性 bug，扩容前必须做 | ✅ 已落地 |
@@ -41,9 +44,9 @@
 | 是否关注 | 每次 DB COUNT（无索引） | Redis SISMEMBER；集合缺失时回源 DB 并重建 |
 | 订单状态轮询 | 每次查 DB | 订单落库后写 Redis 短缓存（5 分钟），支付/关单时删除 |
 | 秒杀落库 | 每条消息：锁 + SELECT + UPDATE 热点库存行 + INSERT | **批量消费**：一批按券聚合成一条 `stock = stock - n` + 多值 INSERT；失败降级逐条，再失败进 DLT |
-| 超时关单 | 全表扫描 + 一次性加载 + 单个大事务 | `idx_status_ctime`；每批 500 条独立短事务；库存回补按券聚合；Redis 回补 pipeline |
+| 超时关单 | 全表扫描 + 一次性加载 + 单个大事务 | `idx_status_ctime`（PG 版为部分索引 `idx_voucher_order_unpaid_ctime`）；每批 500 条独立短事务；库存回补按券聚合；Redis 回补 pipeline |
 | 秒杀 Lua | 不校验活动时间 | 校验 `seckill:time:{id}`（启动/新增券时预热） |
-| 索引 | 多张表只有主键 | 见 `db/migration_v2.sql` |
+| 索引 | 多张表只有主键 | 见 `db/hmdp.sql`（原 MySQL 补索引脚本 `migration_v2.sql` 已随迁移删除） |
 | 连接池 | Hikari 默认 10、Lettuce 10，对 200 个 Tomcat 线程 | Hikari 30、Lettuce 50，显式超时 |
 | 日志 | `com.hmdp: debug`（SQL、每条消息都打日志） | 默认 info，`--spring.profiles.active=dev` 打开 debug |
 | JDBC | 批量插入逐条执行 | `rewriteBatchedStatements=true` |
@@ -66,8 +69,8 @@ DB 库存 = Redis 库存；约 2000 笔订单只执行了约 83 次库存 UPDATE
 - **防刷**：验证码同一手机号 60s 一次、同一 IP 每小时 20 次。
 - **部署**：`docker compose -f deploy/docker-compose.yml up -d --scale app=3`，然后 `restart frontend`。
 
-**容量估算**：每个副本 Hikari 30 连接，副本数 × 30 需小于 MySQL `max_connections`（默认 151），
-副本超过 4 个时调大 MySQL 连接数或调小 `DB_POOL_MAX`。
+**容量估算**：每个副本 Hikari 30 连接，副本数 × 30 需小于 PostgreSQL `max_connections`（默认 100，`PG_MAX_CONNECTIONS`），
+副本超过 3 个时调大连接数、调小 `DB_POOL_MAX`，或在前面加 PgBouncer（transaction 模式）。
 
 ## 阶段 3：架构演进（方案）
 

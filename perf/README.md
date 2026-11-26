@@ -1,7 +1,9 @@
 # 压测复现指南
 
 本文记录 `perf/` 下两组压测的完整步骤与口径。所有数字均来自本机实跑，
-环境为 Windows 11 + Docker Desktop（应用 / MySQL 8 / Redis 7 / RocketMQ 同机）。
+环境为 Windows 11 + Docker Desktop（应用 / Redis 7 / Kafka 同机）。
+> **数据库说明**：下文的实测数字（秒杀 QPS、缓存 A/B）是在 MySQL 8 上测的，项目已整体迁移到 PostgreSQL 16，
+> 数字未在 PostgreSQL 上重测，仅作历史参考；命令已全部换成 PostgreSQL 版本。
 
 > 这些是**整机上限**（压测机与所有组件同机），不能当作应用或单个组件的容量。
 > 阶段 3 的容量基线（压测机分离、组件单测、拐点、扩展效率、混合场景）见 [baseline/README.md](baseline/README.md)。
@@ -26,7 +28,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ```powershell
 # 秒杀券 id=21，库存 100000（幂等）
-docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < perf/bench-voucher.sql
+docker exec -i -e PGPASSWORD=123456 hmdp-postgres psql -v ON_ERROR_STOP=1 -U postgres -d hmdp < perf/bench-voucher.sql
 
 # 应用不会重新预热已存在的 key，手动同步 Redis 库存
 docker exec hmdp-redis redis-cli SET seckill:stock:21 100000
@@ -39,7 +41,7 @@ pwsh perf/gen_tokens.ps1 -Count 1000
 每轮压测前重置：
 
 ```powershell
-docker exec hmdp-mysql mysql -uroot -p123456 hmdp -e "DELETE FROM tb_voucher_order WHERE voucher_id=21; UPDATE tb_seckill_voucher SET stock=100000 WHERE voucher_id=21;"
+docker exec -e PGPASSWORD=123456 hmdp-postgres psql -U postgres -d hmdp -c "DELETE FROM tb_voucher_order WHERE voucher_id=21; UPDATE tb_seckill_voucher SET stock=100000 WHERE voucher_id=21;"
 docker exec hmdp-redis redis-cli SET seckill:stock:21 100000
 docker exec hmdp-redis redis-cli DEL seckill:order:21
 # 活动时间缓存（seckill:time:21）在应用启动时预热；压测券在启动后才导入时删掉即可，key 不存在时 Lua 跳过时间校验
@@ -71,7 +73,7 @@ jmeter -n -t perf/seckill-bench.jmx `
 每轮结束校验：
 
 ```powershell
-docker exec hmdp-mysql mysql -uroot -p123456 hmdp -e "SELECT COUNT(*) orders, COUNT(DISTINCT user_id) users FROM tb_voucher_order WHERE voucher_id=21; SELECT stock FROM tb_seckill_voucher WHERE voucher_id=21;"
+docker exec -e PGPASSWORD=123456 hmdp-postgres psql -U postgres -d hmdp -c "SELECT COUNT(*) orders, COUNT(DISTINCT user_id) users FROM tb_voucher_order WHERE voucher_id=21; SELECT stock FROM tb_seckill_voucher WHERE voucher_id=21;"
 docker exec hmdp-redis redis-cli GET seckill:stock:21
 ```
 
@@ -108,11 +110,14 @@ $env:HMDP_CACHE_ENABLED='true'
 docker compose -f deploy/docker-compose.yml up -d app
 ```
 
-MySQL 查询量用 `SHOW GLOBAL STATUS LIKE 'Questions'` 在压测前后各取一次差值。
+PostgreSQL 查询量用 pg_stat_statements：压测前 `SELECT pg_stat_statements_reset();`，压测后
+`SELECT sum(calls) FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = 'hmdp');`
+（扩展由 `db/hmdp.sql` 创建，容器需带 `shared_preload_libraries=pg_stat_statements`）。
+也可以看 `pg_stat_database` 的 `xact_commit` 压测前后差值（事务数，不是语句数）。
 
 实测（200 并发 / 30s）：
 
-| 指标 | 缓存 + 布隆 | 直查 MySQL |
+| 指标（MySQL 8 实测） | 缓存 + 布隆 | 直查 MySQL |
 | --- | ---: | ---: |
 | QPS | 10,494 | 8,367 |
 | 平均 RT | 18.6 ms | 23.5 ms |

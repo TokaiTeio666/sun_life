@@ -5,36 +5,48 @@
 # 环境变量可放在 deploy/.env 中覆盖（端口映射、密码等）
 
 services:
-  # ---------- MySQL 8（首次启动自动导入 hmdp.sql 并建库） ----------
-  mysql:
+  # ---------- PostgreSQL 16（首次启动自动导入 hmdp.sql 并建表） ----------
+  postgres:
     restart: unless-stopped
-    image: mysql:8.0
-    container_name: hmdp-mysql
+    image: postgres:16.4
+    container_name: hmdp-postgres
     environment:
-      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
-      MYSQL_DATABASE: hmdp
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-123456}"
+      POSTGRES_DB: hmdp
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C.UTF-8"
       TZ: Asia/Shanghai
     command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
-      # 课程 hmdp.sql 使用 DEFAULT '0000-00-00 00:00:00'，需关闭严格模式才能导入
-      - --sql-mode=NO_ENGINE_SUBSTITUTION
-      # 慢查询日志（容量基线与瓶颈定位用）：超过 200ms 记录，mysqld_exporter 读取 Slow_queries 计数
-      - --slow-query-log=ON
-      - --slow-query-log-file=/var/lib/mysql/slow.log
-      - --long-query-time=0.2
-      # 容量参数：默认值就是 MySQL 自身的默认值；压测 / 生产按机器规格调大（见 deploy/bench.env.example）
-      - --max-connections=${MYSQL_MAX_CONNECTIONS:-151}
-      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL:-128M}
-      - --innodb-redo-log-capacity=${MYSQL_REDO_LOG:-100M}
+      - postgres
+      - -c
+      - timezone=Asia/Shanghai
+      - -c
+      - log_timezone=Asia/Shanghai
+      # 慢查询日志（容量基线与瓶颈定位用）：超过 200ms 的语句写入日志
+      - -c
+      - log_min_duration_statement=200
+      # 语句级统计：postgres-exporter 的 stat_statements 采集器读取（hmdp.sql 里 CREATE EXTENSION）
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      # 容量参数：压测 / 生产按机器规格调大（见 deploy/bench.env.example）
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-4GB}
+      - -c
+      - max_wal_size=${PG_MAX_WAL_SIZE:-1GB}
     ports:
-      - "${MYSQL_PORT:-3307}:3306"
+      - "${PG_PORT:-5433}:5432"
     volumes:
-      - mysql-data:/var/lib/mysql
-      # 首次启动自动建表导数据（幂等：表存在则跳过）
+      - postgres-data:/var/lib/postgresql/data
+      # 首次启动自动建表导数据（仅数据目录为空时执行）
       - ../src/main/resources/db/hmdp.sql:/docker-entrypoint-initdb.d/hmdp.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-123456}"]
+      # 走 TCP：initdb 导入 hmdp.sql 期间的临时实例只监听 unix socket，导入完成前不会误报就绪
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d hmdp"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -101,20 +113,20 @@ services:
       - "9081"
     environment:
       # 覆盖 application.yaml 中 127.0.0.1 的配置，默认连同一编排里的容器；
-      # 分机部署时用 APP_MYSQL_ADDR / APP_REDIS_HOST / APP_REDIS_PORT / APP_KAFKA_BOOTSTRAP 指向其他机器
-      SPRING_DATASOURCE_URL: "jdbc:mysql://${APP_MYSQL_ADDR:-mysql:3306}/hmdp?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&characterEncoding=utf8&rewriteBatchedStatements=true"
-      SPRING_DATASOURCE_USERNAME: "root"
-      SPRING_DATASOURCE_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
+      # 分机部署时用 APP_PG_ADDR / APP_REDIS_HOST / APP_REDIS_PORT / APP_KAFKA_BOOTSTRAP 指向其他机器
+      SPRING_DATASOURCE_URL: "jdbc:postgresql://${APP_PG_ADDR:-postgres:5432}/hmdp?reWriteBatchedInserts=true"
+      SPRING_DATASOURCE_USERNAME: "postgres"
+      SPRING_DATASOURCE_PASSWORD: "${POSTGRES_PASSWORD:-123456}"
       SPRING_DATA_REDIS_HOST: "${APP_REDIS_HOST:-redis}"
       SPRING_DATA_REDIS_PORT: "${APP_REDIS_PORT:-6379}"
       SPRING_KAFKA_BOOTSTRAP_SERVERS: "${APP_KAFKA_BOOTSTRAP:-kafka:9092}"
-      # 压测开关：false 时商铺详情直查 MySQL（用于缓存 A/B 对比）
+      # 压测开关：false 时商铺详情直查 PostgreSQL（用于缓存 A/B 对比）
       HMDP_CACHE_ENABLED: "${HMDP_CACHE_ENABLED:-true}"
       # 商铺布隆过滤器的设计容量（店铺数上限）；改动后启动时自动换新位图并重新预热
       BLOOM_EXPECTED_INSERTIONS: "${BLOOM_EXPECTED_INSERTIONS:-1000000}"
       # 图片写共享卷，任意副本上传、nginx 直接对外提供
       HMDP_UPLOAD_DIR: "/data/upload"
-      # 每个副本的 DB 连接池上限；副本数 × 该值需小于 MySQL max_connections
+      # 每个副本的 DB 连接池上限；副本数 × 该值需小于 PostgreSQL max_connections
       DB_POOL_MAX: "${DB_POOL_MAX:-30}"
       # 过载保护：等 DB 连接的超时（毫秒）；回源 DB 并发闸许可数（-1 = 连接池 × 2，0 = 关闭）
       DB_CONN_TIMEOUT_MS: "${DB_CONN_TIMEOUT_MS:-800}"
@@ -149,7 +161,7 @@ services:
       timeout: 5s
       retries: 12
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -174,8 +186,8 @@ services:
         condition: service_healthy
 
 volumes:
-  mysql-data:
-    name: hmdp-mysql8-data
+  postgres-data:
+    name: hmdp-pg16-data
   redis-data:
     name: hmdp-redis-data
   kafka-data:

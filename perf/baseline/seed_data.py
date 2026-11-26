@@ -10,12 +10,12 @@
   python perf/baseline/seed_data.py                                  # 默认规模
   python perf/baseline/seed_data.py --users 100000 --shops 10000 --orders 1000000   # 1/10 规模试跑
   python perf/baseline/seed_data.py --steps order                    # 只跑某几步（逗号分隔）
-  python perf/baseline/seed_data.py --buffer-pool-gb 4               # 灌数前把 InnoDB 缓冲池调到 4G（见下）
+  python perf/baseline/seed_data.py --shared-buffers-gb 4            # 把 shared_buffers 调到 4G（需重启 postgres，见下）
   python perf/baseline/seed_data.py --steps tokens --tokens 2000     # 只生成登录 token（写 Redis + token.txt）
 
-数据全部由 MySQL 服务端用 INSERT ... SELECT 生成，不经过网络传输；客户端以一次性容器运行
-（docker run --rm），连接方式与 component-bench.sh 相同，环境变量也通用：
-  NET=host MYSQL_HOST=10.0.0.5 MYSQL_PORT=3307 REDIS_HOST=10.0.0.6 REDIS_PORT=6380 \
+数据全部由 PostgreSQL 服务端用 INSERT ... SELECT ... generate_series(...) 生成，不经过网络传输；客户端以一次性
+容器运行（docker run --rm，用 postgres:16.4 镜像里的 psql），连接方式与 component-bench.sh 相同，环境变量也通用：
+  NET=host PG_HOST=10.0.0.5 PG_PORT=5433 REDIS_HOST=10.0.0.6 REDIS_PORT=6380 \
       python perf/baseline/seed_data.py
 
 可重复执行、可中断续跑：每一步的进度记在 seed_progress 表里，和该批数据在同一个事务提交。
@@ -39,8 +39,18 @@ id 插在已有订单之间（不冲突，但不再是主键顺序写入，时�
 
 灌完之后：
   1. 重启 app（布隆过滤器在启动时预热；不重启的话要等定时增量同步，默认 1 分钟一轮，期间新店铺会被判为「不存在」）；
-  2. 重新生成 token：加 --tokens <N>（或单独跑 --steps tokens），MySQL / Redis 不在本机时也能用；
+  2. 重新生成 token：加 --tokens <N>（或单独跑 --steps tokens），PostgreSQL / Redis 不在本机时也能用；
   3. 压测加 --prop SHOP_MAX=<店铺数>。
+
+灌数时会话里设 synchronous_commit = off：提交时不等 WAL 刷盘，批量写入快很多。进度和数据在同一个事务里，
+断电最多丢最后几个事务，重跑会从 seed_progress 记录的位置补上，不会出现数据与进度不一致。
+（PostgreSQL 没有「关 binlog」这种会话级开关，WAL 必须写；原 --keep-binlog 选项已去掉。）
+
+关于 shared_buffers（MySQL 的 innodb_buffer_pool_size 运行中能改，shared_buffers 不行）：
+--shared-buffers-gb 只会执行 ALTER SYSTEM SET shared_buffers（写入 postgresql.auto.conf）然后提示退出；
+需要自己重启 postgres（docker restart hmdp-postgres）后再重新运行本脚本。
+若 compose 里用 command: -c shared_buffers=... 启动，命令行参数优先于 auto.conf，要改 compose 文件。
+（旧名 --buffer-pool-gb 仍可用，是同一个选项。）
 
 需要 Python 3.12+（只用标准库）和 docker。
 """
@@ -60,15 +70,15 @@ VOUCHER_LIMIT = 999998       # 999999 是 component-bench.sh 的压测券
 ORDER_SEED_FLAG = 0x80000000  # 造数订单 id 的序列号最高位置 1，与 RedisIdWorker 生成的 id 永不冲突
 ALL_STEPS = ["user", "user_info", "shop", "voucher", "blog", "follow", "order", "redis-geo", "redis-feed"]
 
-# 造数与基线依赖的二级索引（migration_v2.sql）。旧数据卷可能只有主键：
-# 缺 idx_* 时读 SQL 会退化成全表扫描，缺 uk_user_follow 时关注步骤的 INSERT IGNORE 不会去重。
+# 造数与基线依赖的二级索引（db/hmdp.sql）。手工建的库可能缺索引：
+# 缺 idx_* 时读 SQL 会退化成全表扫描，缺 uk_user_follow 时关注步骤的 ON CONFLICT DO NOTHING 不会去重。
 # 只检查本次要跑的步骤对应的索引。
 REQUIRED_INDEXES = [
     ("tb_blog", "idx_liked", "blog"),
     ("tb_blog", "idx_user_id", "blog"),
     ("tb_follow", "uk_user_follow", "follow"),
     ("tb_follow", "idx_follow_user", "follow"),
-    ("tb_voucher_order", "idx_status_ctime", "order"),
+    ("tb_voucher_order", "idx_voucher_order_unpaid_ctime", "order"),
     ("tb_voucher_order", "idx_user_voucher", "order"),
     ("tb_voucher", "idx_shop_id", "voucher"),
 ]
@@ -91,30 +101,28 @@ class Seeder:
     def __init__(self, args):
         self.a = args
         self.now = int(time.time())
-        self.prefix = "SET NAMES utf8mb4;\n"
-        if not args.keep_binlog:
-            # 灌数不写 binlog：省一半以上的写入量。有从库、或托管数据库不允许时加 --keep-binlog
-            self.prefix += "SET SESSION sql_log_bin = 0;\n"
+        # 客户端编码与时区：timestamp 列不带时区，统一按东八区写入，与应用的 LocalDateTime 一致
+        self.base = "SET client_encoding TO 'UTF8';\nSET timezone TO 'Asia/Shanghai';\n"
+        # 灌数不等 WAL 刷盘：省掉每个事务提交时的 fsync（进度与数据同事务，见文件头说明）
+        self.prefix = self.base + "SET synchronous_commit = off;\n"
 
     # ---------- 客户端 ----------
 
-    def mysql(self, sql, with_prefix=True):
+    def psql(self, sql, with_prefix=True):
         a = self.a
-        cmd = ["docker", "run", "--rm", "-i", "--network", a.net, "-e", f"MYSQL_PWD={a.mysql_password}",
-               a.mysql_image, "mysql", "-h", a.mysql_host, "-P", str(a.mysql_port), f"-u{a.mysql_user}",
-               "--default-character-set=utf8mb4", "-N", "-B", a.mysql_db]
-        body = (self.prefix if with_prefix else "SET NAMES utf8mb4;\n") + sql
+        # -A -t -F：无对齐、无表头、制表符分隔，便于下面按行 / 按制表符解析
+        cmd = ["docker", "run", "--rm", "-i", "--network", a.net, "-e", f"PGPASSWORD={a.pg_password}",
+               a.pg_image, "psql", "-v", "ON_ERROR_STOP=1", "-X", "-q", "-A", "-t", "-F", "\t",
+               "-h", a.pg_host, "-p", str(a.pg_port), "-U", a.pg_user, "-d", a.pg_db, "-f", "-"]
+        body = (self.prefix if with_prefix else self.base) + sql
         r = subprocess.run(cmd, input=body.encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if r.returncode != 0:
             err = r.stderr.decode("utf-8", "replace").strip()
-            hint = ""
-            if "sql_log_bin" in err or "SUPER" in err or "Access denied; you need" in err:
-                hint = "\n提示：当前账号不能关闭 binlog，加 --keep-binlog 重试。"
-            die(f"MySQL 执行失败：{err}{hint}\n--- SQL（前 600 字符）---\n{sql[:600]}")
+            die(f"PostgreSQL 执行失败：{err}\n--- SQL（前 600 字符）---\n{sql[:600]}")
         return r.stdout.decode("utf-8", "replace")
 
     def scalar(self, sql):
-        out = self.mysql(sql, with_prefix=False).strip()
+        out = self.psql(sql, with_prefix=False).strip()
         return out.splitlines()[-1] if out else ""
 
     def redis_pipe(self, payload):
@@ -135,24 +143,22 @@ class Seeder:
 
     # ---------- 进度与分批 ----------
 
-    def prepare(self, seq_rows):
-        self.mysql(
+    def prepare(self):
+        self.psql(
             "CREATE TABLE IF NOT EXISTS seed_progress ("
-            " step VARCHAR(32) PRIMARY KEY, done BIGINT NOT NULL,"
-            " update_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
-            ") COMMENT = 'seed_data.py 的进度，可删除（删除后各步从现有最大 id 续跑）';\n"
-            "CREATE TABLE IF NOT EXISTS seed_seq (n INT PRIMARY KEY) COMMENT = 'seed_data.py 的临时序列表';\n")
-        if int(self.scalar("SELECT COUNT(*) FROM seed_seq") or 0) < seq_rows:
-            self.mysql(
-                f"SET SESSION cte_max_recursion_depth = {seq_rows + 10};\n"
-                "TRUNCATE TABLE seed_seq;\n"
-                "INSERT INTO seed_seq WITH RECURSIVE s(n) AS ("
-                f"SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n + 1 < {seq_rows}) SELECT n FROM s;\n")
+            " step varchar(32) PRIMARY KEY, done bigint NOT NULL,"
+            " update_time timestamp NOT NULL DEFAULT now());\n"
+            "COMMENT ON TABLE seed_progress IS 'seed_data.py 的进度，可删除（删除后各步从现有最大 id 续跑）';\n")
 
     def progress(self, step, init_sql):
         """读取某一步的进度；第一次运行时用 init_sql 的结果初始化。"""
-        self.mysql(f"INSERT IGNORE INTO seed_progress (step, done) SELECT '{step}', ({init_sql});\n")
+        self.psql(f"INSERT INTO seed_progress (step, done) SELECT '{step}', ({init_sql}) ON CONFLICT (step) DO NOTHING;\n")
         return int(self.scalar(f"SELECT done FROM seed_progress WHERE step = '{step}'"))
+
+    def fix_identity(self, table):
+        """批量写入了显式 id，把 IDENTITY 序列推到当前最大 id 之后，否则应用自增插入会撞主键。"""
+        self.psql(f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE((SELECT max(id) FROM {table}), 0) + 1, false);\n",
+                  with_prefix=False)
 
     def run_step(self, step, label, start, target, make_sql):
         """从 start 做到 target：make_sql(done, cnt) 生成「在 done 之后再做 cnt 个」的 SQL。"""
@@ -164,8 +170,8 @@ class Seeder:
         done, t0, last = start, time.time(), 0.0
         while done < target:
             cnt = min(self.a.chunk, target - done)
-            self.mysql("START TRANSACTION;\n" + make_sql(done, cnt)
-                       + f"UPDATE seed_progress SET done = {done + cnt} WHERE step = '{step}';\nCOMMIT;\n")
+            self.psql("BEGIN;\n" + make_sql(done, cnt)
+                      + f"UPDATE seed_progress SET done = {done + cnt}, update_time = now() WHERE step = '{step}';\nCOMMIT;\n")
             done += cnt
             el = time.time() - t0
             if el - last >= 5 or done >= target:
@@ -174,7 +180,17 @@ class Seeder:
                 eta = (target - done) / rate if rate > 0 else 0
                 log(f"  {label} {done - start:,}/{total:,}  {rate:,.0f}/s  剩余约 {eta:,.0f}s")
 
-    # ---------- MySQL 各步 ----------
+    @staticmethod
+    def series(cnt):
+        """生成 n = 0 .. cnt-1 的行（代替 MySQL 版的 seed_seq 序列表）。"""
+        return f"generate_series(0, {cnt - 1}) AS g(n)"
+
+    @staticmethod
+    def pick(options):
+        """从常量里随机取一个（代替 MySQL 的 ELT(1 + FLOOR(RAND() * N), ...)）。"""
+        return f"(ARRAY[{', '.join(options)}])[1 + floor(random() * {len(options)})::int]"
+
+    # ---------- PostgreSQL 各步 ----------
 
     def seed_user(self):
         start = self.progress("user", "SELECT COALESCE(MAX(id), 0) FROM tb_user")
@@ -182,47 +198,55 @@ class Seeder:
 
         def sql(done, cnt):
             b = done + 1
+            uid = f"({b}::bigint + n)"
             return (
                 "INSERT INTO tb_user (id, phone, password, nick_name, icon, create_time)\n"
-                f"SELECT {b} + n, CONCAT('19', LPAD({b} + n, 9, '0')), '', CONCAT('user_', {b} + n), '',\n"
-                f"       FROM_UNIXTIME({now} - FLOOR(RAND() * 63072000))\n"
-                f"FROM seed_seq WHERE n < {cnt};\n")
+                f"SELECT {uid}, '19' || lpad({uid}::text, 9, '0'), '', 'user_' || {uid}, '',\n"
+                f"       to_timestamp({now} - floor(random() * 63072000))::timestamp\n"
+                f"FROM {self.series(cnt)};\n")
         self.run_step("user", "用户 tb_user", start, self.a.users, sql)
+        self.fix_identity("tb_user")
 
     def seed_user_info(self):
         start = self.progress("user_info", "SELECT 0")
+        cities = ["'杭州'", "'上海'", "'北京'", "'广州'", "'深圳'", "'成都'", "'南京'", "'武汉'"]
 
         def sql(done, cnt):
             b = done + 1
             return (
-                "INSERT IGNORE INTO tb_user_info (user_id, city, introduce, fans, followee, gender, birthday, credits, level)\n"
-                f"SELECT {b} + n, ELT(1 + FLOOR(RAND() * 8), '杭州', '上海', '北京', '广州', '深圳', '成都', '南京', '武汉'),\n"
-                "       '这个人很懒，什么都没有留下', 0, 0, FLOOR(RAND() * 2),\n"
-                "       DATE_SUB('2005-01-01', INTERVAL FLOOR(RAND() * 10000) DAY), FLOOR(RAND() * 5000), FLOOR(RAND() * 10)\n"
-                f"FROM seed_seq WHERE n < {cnt};\n")
+                "INSERT INTO tb_user_info (user_id, city, introduce, fans, followee, gender, birthday, credits, level)\n"
+                f"SELECT {b}::bigint + n, {self.pick(cities)},\n"
+                "       '这个人很懒，什么都没有留下', 0, 0, floor(random() * 2)::int,\n"
+                "       DATE '2005-01-01' - floor(random() * 10000)::int, floor(random() * 5000)::int, floor(random() * 10)::int\n"
+                f"FROM {self.series(cnt)}\n"
+                "ON CONFLICT (user_id) DO NOTHING;\n")
         self.run_step("user_info", "用户资料 tb_user_info", start, self.a.users, sql)
 
     def seed_shop(self):
         start = self.progress("shop", "SELECT COALESCE(MAX(id), 0) FROM tb_shop")
+        names = ["'老街火锅'", "'江南小馆'", "'川味坊'", "'海鲜大排档'", "'日式料理'",
+                 "'韩式烤肉'", "'茶餐厅'", "'量贩KTV'", "'美发沙龙'", "'健身工作室'"]
+        areas = ["'大关'", "'拱宸桥/上塘'", "'运河上街'", "'北部新城'", "'武林广场'", "'西湖文化广场'", "'钱江新城'", "'滨江'"]
+        roads = ["'金华路'", "'丽水路'", "'台州路'", "'湖墅南路'", "'文三路'", "'江南大道'"]
 
         def sql(done, cnt):
             b = done + 1
-            img = "'https://img.example.com/msmerchant/', MD5(CONCAT({k}, ':', {b} + n)), '.jpg'"
-            images = ", ',', ".join(img.format(k=k, b=b) for k in (1, 2, 3))
+            sid = f"({b}::bigint + n)"
+            images = " || ',' || ".join(f"'https://img.example.com/msmerchant/' || md5('{k}:' || {sid}) || '.jpg'" for k in (1, 2, 3))
             return (
                 "INSERT INTO tb_shop (id, name, type_id, images, area, address, x, y, avg_price, sold, comments, score, open_hours)\n"
-                f"SELECT {b} + n,\n"
-                "       CONCAT(ELT(1 + FLOOR(RAND() * 10), '老街火锅', '江南小馆', '川味坊', '海鲜大排档', '日式料理',\n"
-                f"              '韩式烤肉', '茶餐厅', '量贩KTV', '美发沙龙', '健身工作室'), '(', {b} + n, '号店)'),\n"
+                f"SELECT {sid},\n"
+                f"       {self.pick(names)} || '(' || {sid} || '号店)',\n"
                 # 美食类占四成，其余类型均分：让 shop:geo:1 明显比其他类型大，接近真实分布
-                "       IF(RAND() < 0.4, 1, 1 + FLOOR(RAND() * 10)),\n"
-                f"       CONCAT({images}),\n"
-                "       ELT(1 + FLOOR(RAND() * 8), '大关', '拱宸桥/上塘', '运河上街', '北部新城', '武林广场', '西湖文化广场', '钱江新城', '滨江'),\n"
-                "       CONCAT(ELT(1 + FLOOR(RAND() * 6), '金华路', '丽水路', '台州路', '湖墅南路', '文三路', '江南大道'), 1 + FLOOR(RAND() * 999), '号'),\n"
-                "       ROUND(120.0 + RAND() * 0.4, 6), ROUND(30.1 + RAND() * 0.3, 6),\n"
-                "       20 + FLOOR(RAND() * 300), FLOOR(RAND() * 30000), FLOOR(RAND() * 10000), 30 + FLOOR(RAND() * 21), '10:00-22:00'\n"
-                f"FROM seed_seq WHERE n < {cnt};\n")
+                "       CASE WHEN random() < 0.4 THEN 1 ELSE 1 + floor(random() * 10)::int END,\n"
+                f"       {images},\n"
+                f"       {self.pick(areas)},\n"
+                f"       {self.pick(roads)} || (1 + floor(random() * 999)::int) || '号',\n"
+                "       round((120.0 + random() * 0.4)::numeric, 6), round((30.1 + random() * 0.3)::numeric, 6),\n"
+                "       20 + floor(random() * 300)::int, floor(random() * 30000)::int, floor(random() * 10000)::int, 30 + floor(random() * 21)::int, '10:00-22:00'\n"
+                f"FROM {self.series(cnt)};\n")
         self.run_step("shop", "店铺 tb_shop", start, self.a.shops, sql)
+        self.fix_identity("tb_shop")
 
     def seed_voucher(self):
         a = self.a
@@ -233,40 +257,45 @@ class Seeder:
 
         def sql(done, cnt):
             b = done + 1
-            vid = f"({b} + n)"
-            face = f"ELT(1 + ({vid} MOD 4), 2000, 5000, 10000, 20000)"
+            vid = f"({b}::bigint + n)"
+            # 面值（分）：按券 id 轮流取四档。PG 的 int / int 是整数除法，对应 MySQL 的 DIV
+            face = f"(ARRAY[2000, 5000, 10000, 20000])[1 + ({vid} % 4)::int]"
             return (
                 "INSERT INTO tb_voucher (id, shop_id, title, sub_title, rules, pay_value, actual_value, type, status)\n"
-                f"SELECT {vid}, 1 + (({vid} - {VOUCHER_BASE + 1}) MOD {a.shops}), CONCAT({face} DIV 100, '元代金券'), '周一至周日均可使用',\n"
-                "       '全场通用\\n无需预约\\n可无限叠加\\n不兑现、不找零\\n仅限堂食',\n"
-                f"       {face} * (80 + ({vid} MOD 16)) DIV 100, {face}, IF({vid} MOD 10 = 0, 1, 0), 1\n"
-                f"FROM seed_seq WHERE n < {cnt};\n"
+                f"SELECT {vid}, 1 + (({vid} - {VOUCHER_BASE + 1}) % {a.shops}), ({face} / 100) || '元代金券', '周一至周日均可使用',\n"
+                "       E'全场通用\\n无需预约\\n可无限叠加\\n不兑现、不找零\\n仅限堂食',\n"
+                f"       {face} * (80 + ({vid} % 16)) / 100, {face}, CASE WHEN {vid} % 10 = 0 THEN 1 ELSE 0 END, 1\n"
+                f"FROM {self.series(cnt)};\n"
                 # 秒杀券活动全部已结束（至少 3 天前）：SeckillStockInitializer 只预热未过期的券，
                 # 否则每个副本启动时要为几万张券逐个访问 Redis
                 "INSERT INTO tb_seckill_voucher (voucher_id, stock, begin_time, end_time)\n"
-                f"SELECT {vid}, FLOOR(RAND() * 200), NOW() - INTERVAL (10 + ({vid} MOD 80)) DAY, NOW() - INTERVAL (3 + ({vid} MOD 80)) DAY\n"
-                f"FROM seed_seq WHERE n < {cnt} AND {vid} MOD 10 = 0;\n")
+                f"SELECT {vid}, floor(random() * 200)::int, now() - (10 + {vid} % 80) * interval '1 day', now() - (3 + {vid} % 80) * interval '1 day'\n"
+                f"FROM {self.series(cnt)} WHERE {vid} % 10 = 0;\n")
         self.run_step("voucher", "优惠券 tb_voucher", start, VOUCHER_BASE + a.vouchers, sql)
+        self.fix_identity("tb_voucher")
 
     def seed_blog(self):
         a = self.a
         start = self.progress("blog", "SELECT COALESCE(MAX(id), 0) FROM tb_blog")
         now, span, creators = self.now, a.order_days * 86400, self.creators
+        titles = ["'周末探店好去处'", "'人均50吃到撑'", "'这家店我能吃一辈子'", "'约会圣地推荐'", "'打工人的深夜食堂'", "'宝藏小店分享'"]
 
         def sql(done, cnt):
             b = done + 1
+            bid = f"({b}::bigint + n)"
             return (
                 "INSERT INTO tb_blog (id, shop_id, user_id, title, images, content, liked, comments, create_time)\n"
-                f"SELECT {b} + n, 1 + FLOOR(RAND() * {a.shops}), 1 + FLOOR({creators} * POW(RAND(), 2)),\n"
-                "       CONCAT(ELT(1 + FLOOR(RAND() * 6), '周末探店好去处', '人均50吃到撑', '这家店我能吃一辈子', '约会圣地推荐',\n"
-                f"              '打工人的深夜食堂', '宝藏小店分享'), ' #', {b} + n),\n"
-                f"       CONCAT('/imgs/blogs/', ({b} + n) MOD 16, '/', ({b} + n) MOD 7, '/', MD5({b} + n), '.jpg'),\n"
-                "       REPEAT('环境很好，服务热情，菜品味道不错，分量也足，性价比很高，推荐大家周末来打卡。', 6),\n"
+                f"SELECT {bid}, 1 + floor(random() * {a.shops})::bigint, 1 + floor({creators} * power(random(), 2))::bigint,\n"
+                f"       {self.pick(titles)} || ' #' || {bid},\n"
+                f"       '/imgs/blogs/' || ({bid} % 16) || '/' || ({bid} % 7) || '/' || md5({bid}::text) || '.jpg',\n"
+                "       repeat('环境很好，服务热情，菜品味道不错，分量也足，性价比很高，推荐大家周末来打卡。', 6),\n"
                 # 点赞数长尾：P(点赞 ≥ x) = 1/(x+1)，约九成笔记是个位数，万分之一上万（热门榜 ORDER BY liked DESC 走 idx_liked）
-                "       LEAST(100000, FLOOR(1 / (1 - RAND())) - 1), FLOOR(RAND() * 500),\n"
-                f"       FROM_UNIXTIME({now} - FLOOR(RAND() * {span}))\n"
-                f"FROM seed_seq WHERE n < {cnt};\n")
+                # PG 的 random() 取值 [0, 1)，1 - random() 不会为 0
+                "       LEAST(100000, floor(1 / (1 - random())) - 1)::int, floor(random() * 500)::int,\n"
+                f"       to_timestamp({now} - floor(random() * {span}))::timestamp\n"
+                f"FROM {self.series(cnt)};\n")
         self.run_step("blog", "笔记 tb_blog", start, a.blogs, sql)
+        self.fix_identity("tb_blog")
 
     def seed_follow(self):
         a = self.a
@@ -276,22 +305,24 @@ class Seeder:
         def sql(done, cnt):
             b = done + 1
             # 关注对象按三次方偏向头部创作者：1 号创作者拿到约 (1/创作者数)^(1/3) 的关注（10 万创作者时约 2%）。
-            # 同一用户多次抽到同一人由 uk_user_follow + INSERT IGNORE 去重，所以实际行数略少于 用户数 × 关注数
+            # 同一用户多次抽到同一人由 uk_user_follow + ON CONFLICT DO NOTHING 去重，所以实际行数略少于 用户数 × 关注数
+            # 子查询里有 volatile 的 random()，PG 不会把它展开合并，u / f 每行只算一次
             one = (
-                "INSERT IGNORE INTO tb_follow (user_id, follow_user_id, create_time)\n"
-                f"SELECT /*+ NO_MERGE(t) */ u, f, FROM_UNIXTIME({now} - FLOOR(RAND() * 31536000))\n"
-                f"FROM (SELECT {b} + n AS u, 1 + FLOOR({creators} * POW(RAND(), 3)) AS f FROM seed_seq WHERE n < {cnt}) t\n"
-                "WHERE u <> f;\n")
+                "INSERT INTO tb_follow (user_id, follow_user_id, create_time)\n"
+                f"SELECT u, f, to_timestamp({now} - floor(random() * 31536000))::timestamp\n"
+                f"FROM (SELECT {b}::bigint + n AS u, 1 + floor({creators} * power(random(), 3))::bigint AS f FROM {self.series(cnt)}) t\n"
+                "WHERE u <> f\n"
+                "ON CONFLICT DO NOTHING;\n")
             return one * a.follows_per_user
         self.run_step("follow", "关注 tb_follow（按用户）", start, a.users, sql)
         if start < a.users:
             # 粉丝数 / 关注数与 tb_follow 对齐（按全表重算，可重复执行）
             log("回填 tb_user_info 的 fans / followee")
-            self.mysql(
-                "UPDATE tb_user_info i JOIN (SELECT follow_user_id AS u, COUNT(*) AS c FROM tb_follow GROUP BY follow_user_id) t\n"
-                "  ON t.u = i.user_id SET i.fans = t.c;\n"
-                "UPDATE tb_user_info i JOIN (SELECT user_id AS u, COUNT(*) AS c FROM tb_follow GROUP BY user_id) t\n"
-                "  ON t.u = i.user_id SET i.followee = t.c;\n")
+            self.psql(
+                "UPDATE tb_user_info i SET fans = t.c\n"
+                "  FROM (SELECT follow_user_id AS u, count(*) AS c FROM tb_follow GROUP BY follow_user_id) t WHERE t.u = i.user_id;\n"
+                "UPDATE tb_user_info i SET followee = t.c\n"
+                "  FROM (SELECT user_id AS u, count(*) AS c FROM tb_follow GROUP BY user_id) t WHERE t.u = i.user_id;\n")
 
     def seed_order(self):
         a = self.a
@@ -306,24 +337,26 @@ class Seeder:
             die("--orders 不能超过 2^31")
         start = self.progress("order", "SELECT 0")
         now, users, vouchers, total = self.now, a.users, a.vouchers, a.orders
+        # 已核销 55% / 已支付 30% / 已取消 10% / 已退款 5%；不生成「未支付」（见文件头说明）
+        statuses = ["3"] * 11 + ["2"] * 6 + ["4"] * 2 + ["6"]
 
         def sql(done, cnt):
             return (
                 "INSERT INTO tb_voucher_order (id, user_id, voucher_id, pay_type, status, create_time, pay_time, use_time, refund_time, update_time)\n"
-                f"SELECT /*+ NO_MERGE(t) */ ((ct - {begin}) << 32) | {ORDER_SEED_FLAG} | i, uid, vid, pt, st, FROM_UNIXTIME(ct),\n"
-                f"       IF(st IN (2, 3, 6), FROM_UNIXTIME(LEAST(ct + 30 + FLOOR(r * 600), {now})), NULL),\n"
-                f"       IF(st = 3, FROM_UNIXTIME(LEAST(ct + 3600 + FLOOR(r * 259200), {now})), NULL),\n"
-                f"       IF(st = 6, FROM_UNIXTIME(LEAST(ct + 3600 + FLOOR(r * 86400), {now})), NULL),\n"
-                "       FROM_UNIXTIME(ct)\n"
+                f"SELECT ((ct - {begin}) << 32) | {ORDER_SEED_FLAG} | i, uid, vid, pt, st, to_timestamp(ct)::timestamp,\n"
+                f"       CASE WHEN st IN (2, 3, 6) THEN to_timestamp(LEAST(ct + 30 + floor(r * 600), {now}))::timestamp END,\n"
+                f"       CASE WHEN st = 3 THEN to_timestamp(LEAST(ct + 3600 + floor(r * 259200), {now}))::timestamp END,\n"
+                f"       CASE WHEN st = 6 THEN to_timestamp(LEAST(ct + 3600 + floor(r * 86400), {now}))::timestamp END,\n"
+                "       to_timestamp(ct)::timestamp\n"
                 "FROM (\n"
-                f"  SELECT {done} + n AS i, {t_start} + ({done} + n) * {span} DIV {total} AS ct,\n"
-                f"         1 + FLOOR({users} * POW(RAND(), 1.5)) AS uid,\n"
-                f"         {VOUCHER_BASE + 1} + FLOOR({vouchers} * POW(RAND(), 2)) AS vid,\n"
-                "         1 + FLOOR(RAND() * 3) AS pt,\n"
-                # 已核销 55% / 已支付 30% / 已取消 10% / 已退款 5%；不生成「未支付」（见文件头说明）
-                "         ELT(1 + FLOOR(RAND() * 20), 3,3,3,3,3,3,3,3,3,3,3, 2,2,2,2,2,2, 4,4, 6) AS st,\n"
-                "         RAND() AS r\n"
-                f"  FROM seed_seq WHERE n < {cnt}\n"
+                # i / ct 用 bigint：(序号 × 时间跨度) 会超过 int4。子查询里有 random()，PG 不会展开合并，各列每行只算一次
+                f"  SELECT {done}::bigint + n AS i, {t_start}::bigint + ({done}::bigint + n) * {span} / {total} AS ct,\n"
+                f"         1 + floor({users} * power(random(), 1.5))::bigint AS uid,\n"
+                f"         {VOUCHER_BASE + 1} + floor({vouchers} * power(random(), 2))::bigint AS vid,\n"
+                "         1 + floor(random() * 3)::int AS pt,\n"
+                f"         {self.pick(statuses)} AS st,\n"
+                "         random() AS r\n"
+                f"  FROM {self.series(cnt)}\n"
                 ") t;\n")
         self.run_step("order", "订单 tb_voucher_order", start, a.orders, sql)
 
@@ -345,7 +378,7 @@ class Seeder:
         return b"".join(out)
 
     def seed_redis_geo(self):
-        rows = self.mysql("SELECT type_id, x, y, id FROM tb_shop;\n", with_prefix=False).splitlines()
+        rows = self.psql("SELECT type_id, x, y, id FROM tb_shop;\n", with_prefix=False).splitlines()
         payload = b"".join(self.resp("GEOADD", f"shop:geo:{t}", x, y, i)
                            for t, x, y, i in (r.split("\t") for r in rows if r))
         n = self.redis_pipe(payload)
@@ -360,10 +393,11 @@ class Seeder:
         step, entries, t0 = 20000, 0, time.time()
         for lo in range(1, users + 1, step):
             hi = min(lo + step - 1, users)
-            rows = self.mysql(
-                "SELECT f.user_id, b.id, UNIX_TIMESTAMP(b.create_time) * 1000 FROM tb_follow f\n"
-                "JOIN tb_blog b ON b.user_id = f.follow_user_id\n"
-                f"WHERE f.user_id BETWEEN {lo} AND {hi} AND b.create_time >= NOW() - INTERVAL {a.feed_days} DAY;\n",
+            # timestamp 不带时区：按会话时区（东八区）换算成 epoch，与 MySQL 的 UNIX_TIMESTAMP 一致
+            rows = self.psql(
+                "SELECT f.user_id, b.id, (extract(epoch FROM b.create_time AT TIME ZONE current_setting('TimeZone')) * 1000)::bigint\n"
+                "FROM tb_follow f JOIN tb_blog b ON b.user_id = f.follow_user_id\n"
+                f"WHERE f.user_id BETWEEN {lo} AND {hi} AND b.create_time >= now() - interval '{a.feed_days} days';\n",
                 with_prefix=False).splitlines()
             buf, uids = [], set()
             for r in rows:
@@ -381,7 +415,7 @@ class Seeder:
     def seed_tokens(self):
         """与 gen_tokens.ps1 等价：取前 N 个用户，写 login:token:{uuid}，输出 JMeter 用的 token.txt。"""
         a = self.a
-        rows = self.mysql(f"SELECT id, nick_name, icon FROM tb_user ORDER BY id LIMIT {a.tokens};\n",
+        rows = self.psql(f"SELECT id, nick_name, icon FROM tb_user ORDER BY id LIMIT {a.tokens};\n",
                           with_prefix=False).splitlines()
         if not rows:
             die("tb_user 为空，无法生成 token")
@@ -416,33 +450,43 @@ class Seeder:
                 log(f"[WARN] 订单会引用券 {VOUCHER_BASE + 1}–{VOUCHER_BASE + a.vouchers}，目前只有 {have:,} 张（没有外键，不影响写入）")
         needed = [(t, i) for t, i, step in REQUIRED_INDEXES if step in a.steps]
         if needed:
-            present = {tuple(line.split("\t")) for line in self.mysql(
-                "SELECT table_name, index_name FROM information_schema.statistics "
-                "WHERE table_schema = DATABASE();\n", with_prefix=False).splitlines() if line}
+            present = {tuple(line.split("\t")) for line in self.psql(
+                "SELECT tablename, indexname FROM pg_indexes WHERE schemaname = current_schema();\n",
+                with_prefix=False).splitlines() if line}
             missing = [f"{t}.{i}" for t, i in needed if (t, i) not in present]
             if missing:
                 die("缺少索引：" + ", ".join(missing) +
-                    "\n  旧数据卷先执行 migration_v2.sql：\n"
-                    "    docker exec -i -e MYSQL_PWD=<密码> hmdp-mysql mysql -uroot hmdp < src/main/resources/db/migration_v2.sql\n"
-                    "  缺少 uk_user_follow 时 INSERT IGNORE 不会去重，关注数据会出现重复行。")
+                    "\n  建表脚本 src/main/resources/db/hmdp.sql 里已有这些索引：新建 PG 数据卷会自动执行；\n"
+                    "  已有的库请手工执行其中对应的 CREATE INDEX（或 docker compose down -v 清空数据卷后重建）。\n"
+                    "  缺少 uk_user_follow 时 ON CONFLICT DO NOTHING 不会去重，关注数据会出现重复行。")
+
+    def shared_buffers(self):
+        return int(self.scalar("SELECT pg_size_bytes(current_setting('shared_buffers'))") or 0)
 
     def tune(self):
         a = self.a
-        if a.buffer_pool_gb:
-            self.mysql(f"SET GLOBAL innodb_buffer_pool_size = {int(a.buffer_pool_gb * 1024 ** 3)};\n", with_prefix=False)
-            log(f"innodb_buffer_pool_size 已调到 {a.buffer_pool_gb:g}G（未持久化，MySQL 重启后恢复原值）")
-        pool = int(self.scalar("SELECT @@innodb_buffer_pool_size") or 0)
+        if a.shared_buffers_gb:
+            target = int(a.shared_buffers_gb * 1024 ** 3)
+            if abs(self.shared_buffers() - target) > 8 * 1024 ** 2:
+                # shared_buffers 只能在启动时设置，ALTER SYSTEM 写入 postgresql.auto.conf，重启后才生效
+                self.psql(f"ALTER SYSTEM SET shared_buffers = '{target // 1024 ** 2}MB';\n", with_prefix=False)
+                die(f"shared_buffers 已写入 postgresql.auto.conf（{a.shared_buffers_gb:g}G），但要重启 postgres 才生效：\n"
+                    "    docker restart hmdp-postgres\n"
+                    "  重启后重新运行本命令（已灌的数据会续跑）。若 compose 用 command: -c shared_buffers=... 启动，"
+                    "命令行优先于 auto.conf，需要改 compose 文件。")
+        pool = self.shared_buffers()
         if "order" in a.steps and a.orders >= 1_000_000 and pool < 1024 ** 3:
-            log(f"[WARN] innodb_buffer_pool_size 只有 {pool / 1024 ** 2:,.0f}M：千万级订单的二级索引放不进内存，"
-                "灌数会越来越慢，压测也会变成测磁盘。建议加 --buffer-pool-gb（机器内存的 50–70%）。")
+            log(f"[WARN] shared_buffers 只有 {pool / 1024 ** 2:,.0f}M：千万级订单的二级索引放不进内存，"
+                "灌数会越来越慢，压测也会变成测磁盘。建议加 --shared-buffers-gb（机器内存的 25–40%，剩下的留给 OS 页缓存）。")
 
     def summary(self):
         tables = ["tb_user", "tb_user_info", "tb_shop", "tb_voucher", "tb_seckill_voucher", "tb_blog", "tb_follow", "tb_voucher_order"]
-        self.mysql("".join(f"ANALYZE TABLE {t};\n" for t in tables), with_prefix=False)
-        out = self.mysql(
-            "".join(f"SELECT '{t}', COUNT(*) FROM {t};\n" for t in tables)
-            + "SELECT 'data+index MB', ROUND(SUM(data_length + index_length) / 1048576) FROM information_schema.tables "
-              "WHERE table_schema = DATABASE();\n", with_prefix=False)
+        self.psql("".join(f"ANALYZE {t};\n" for t in tables), with_prefix=False)
+        out = self.psql(
+            "".join(f"SELECT '{t}', count(*) FROM {t};\n" for t in tables)
+            # 含索引与 TOAST 的总大小；只统计上面这几张业务表
+            + "SELECT 'data+index MB', round(sum(pg_total_relation_size(t::regclass)) / 1048576.0)::bigint "
+              f"FROM unnest(ARRAY[{', '.join(repr(t) for t in tables)}]) AS t;\n", with_prefix=False)
         log("完成。各表行数：")
         for line in out.splitlines():
             name, _, val = line.partition("\t")
@@ -461,14 +505,13 @@ class Seeder:
         a = self.a
         self.check()
         self.tune()
-        mysql_steps = [s for s in a.steps if not s.startswith("redis-") and s != "tokens"]
-        if mysql_steps:
-            self.prepare(a.chunk)
+        pg_steps = [s for s in a.steps if not s.startswith("redis-") and s != "tokens"]
+        if pg_steps:
+            self.prepare()
         t0 = time.time()
         for s in a.steps:
             getattr(self, "seed_" + s.replace("-", "_"))()
-        if mysql_steps:
-            self.mysql("DROP TABLE IF EXISTS seed_seq;\n", with_prefix=False)
+        if pg_steps:
             self.summary()
         log(f"总耗时 {time.time() - t0:,.0f}s")
 
@@ -482,7 +525,7 @@ def main():
         except (AttributeError, ValueError):
             pass
 
-    ap = argparse.ArgumentParser(description="压测造数：把 MySQL / Redis 的数据量灌到接近上线的规模",
+    ap = argparse.ArgumentParser(description="压测造数：把 PostgreSQL / Redis 的数据量灌到接近上线的规模",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     g = ap.add_argument_group("规模")
     g.add_argument("--users", type=int, default=1_000_000, help="用户数（tb_user 的最大 id）")
@@ -500,16 +543,16 @@ def main():
     g = ap.add_argument_group("执行")
     g.add_argument("--steps", default=",".join(ALL_STEPS), help="要执行的步骤，逗号分隔，按给定顺序执行")
     g.add_argument("--chunk", type=int, default=250_000, help="每个事务写多少行")
-    g.add_argument("--buffer-pool-gb", type=float, default=0, help="灌数前 SET GLOBAL innodb_buffer_pool_size（0 = 不改）")
-    g.add_argument("--keep-binlog", action="store_true", help="灌数时照常写 binlog（有从库、或托管数据库不允许关闭时用）")
+    g.add_argument("--shared-buffers-gb", "--buffer-pool-gb", dest="shared_buffers_gb", type=float, default=0,
+                   help="把 shared_buffers 改成这个值（0 = 不改）；ALTER SYSTEM 后需重启 postgres 再重跑")
     g = ap.add_argument_group("连接（默认值同 component-bench.sh，也可用同名环境变量）")
     g.add_argument("--net", default=env("NET", "sun_life_default"), help="docker 网络；被测组件在另一台机器时用 host")
-    g.add_argument("--mysql-host", default=env("MYSQL_HOST", "mysql"))
-    g.add_argument("--mysql-port", default=env("MYSQL_PORT", "3306"))
-    g.add_argument("--mysql-user", default=env("MYSQL_USER", "root"))
-    g.add_argument("--mysql-password", default=env("MYSQL_PASSWORD", "123456"))
-    g.add_argument("--mysql-db", default=env("MYSQL_DB", "hmdp"))
-    g.add_argument("--mysql-image", default=env("MYSQL_IMAGE", "mysql:8.0"))
+    g.add_argument("--pg-host", default=env("PG_HOST", "postgres"))
+    g.add_argument("--pg-port", default=env("PG_PORT", "5432"))
+    g.add_argument("--pg-user", default=env("PG_USER", "postgres"))
+    g.add_argument("--pg-password", default=env("PG_PASSWORD", "123456"))
+    g.add_argument("--pg-db", default=env("PG_DB", "hmdp"))
+    g.add_argument("--pg-image", default=env("PG_IMAGE", "postgres:16.4"))
     g.add_argument("--redis-host", default=env("REDIS_HOST", "redis"))
     g.add_argument("--redis-port", default=env("REDIS_PORT", "6379"))
     g.add_argument("--redis-password", default=env("REDIS_PASSWORD", ""))

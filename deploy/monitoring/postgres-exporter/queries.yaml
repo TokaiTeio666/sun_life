@@ -1,0 +1,42 @@
+# postgres-exporter 自定义查询（--extend.query-path）
+# 指标名 = <查询名>_<列名>，例如 pg_lock_waiting_sessions。
+# 内置采集器（stat_database / stat_statements 等）已覆盖事务、元组、连接数，这里只补它们没有的。
+
+# 正在等锁的会话数（热点库存行的行锁等待）
+pg_lock:
+  query: "SELECT count(*) AS waiting_sessions FROM pg_stat_activity WHERE wait_event_type = 'Lock'"
+  master: true
+  metrics:
+    - waiting_sessions:
+        usage: "GAUGE"
+        description: "当前等待锁的会话数"
+
+# 活跃会话与最长执行时间（排除 exporter 自己的连接）
+pg_activity:
+  query: |
+    SELECT
+      count(*) FILTER (WHERE state = 'active') AS active_backends,
+      count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_transaction_backends,
+      COALESCE(max(EXTRACT(EPOCH FROM (now() - query_start))) FILTER (WHERE state = 'active'), 0) AS max_active_seconds
+    FROM pg_stat_activity
+    WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()
+  master: true
+  metrics:
+    - active_backends:
+        usage: "GAUGE"
+        description: "state = active 的会话数"
+    - idle_in_transaction_backends:
+        usage: "GAUGE"
+        description: "事务内空闲（可能持锁不放）的会话数"
+    - max_active_seconds:
+        usage: "GAUGE"
+        description: "当前最长的活跃语句已执行秒数（慢语句信号）"
+
+# 连接数上限（告警用 numbackends / 该值）
+pg_conn_limit:
+  query: "SELECT setting::float AS max_connections FROM pg_settings WHERE name = 'max_connections'"
+  master: true
+  metrics:
+    - max_connections:
+        usage: "GAUGE"
+        description: "max_connections 设置值"

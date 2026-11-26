@@ -1,17 +1,17 @@
 # ========== 分机压测：应用机专用覆盖 ==========
-# 只在「应用机」上叠加使用（MySQL 机、中间件机直接用主编排按服务名启动，见 docs/bench-deploy.md）：
+# 只在「应用机」上叠加使用（PostgreSQL 机、中间件机直接用主编排按服务名启动，见 docs/bench-deploy.md）：
 #   docker compose --env-file deploy/bench.env \
 #     -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml -f deploy/docker-compose.bench-app.yml \
 #     up -d --build --scale app=1
 #
 # 作用：
-#   1. 本机不启动 mysql / redis / kafka（它们在别的机器上，app 通过 bench.env 里的 APP_* 地址访问）；
+#   1. 本机不启动 postgres / redis / kafka（它们在别的机器上，app 通过 bench.env 里的 APP_* 地址访问）；
 #   2. 去掉 app 和各 exporter 对这三个服务的启动依赖；
 #   3. 给每个 app 副本固定 CPU 上限，让「一个副本」成为固定的容量单位，扩展效率才有可比性。
 
 services:
   # 归入一个不会启用的 profile：up / --scale 时不会在本机创建这三个容器
-  mysql:
+  postgres:
     profiles: ["not-on-app-host"]
   redis:
     profiles: ["not-on-app-host"]
@@ -25,7 +25,7 @@ services:
 
   redis-exporter:
     depends_on: !reset {}
-  mysqld-exporter:
+  postgres-exporter:
     depends_on: !reset {}
   kafka-exporter:
     depends_on: !reset {}

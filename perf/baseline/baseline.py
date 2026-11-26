@@ -200,7 +200,7 @@ def scale_report(rows: list[dict], args) -> str:
     if first_bad:
         lines += [
             f"**{first_bad['replicas']} 副本时效率降到 {first_bad['efficiency']:.2f}**。对照同一时间段的 Grafana：",
-            "Redis 主线程 CPU 接近 100%、MySQL 行锁等待 / 连接数、Kafka lag、Hikari pending，",
+            "Redis 主线程 CPU 接近 100%、PostgreSQL 锁等待会话 / 连接数、Kafka lag、Hikari pending，",
             "先饱和的那个组件就是 3-2 的第一优先级。",
         ]
     else:

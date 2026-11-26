@@ -18,7 +18,10 @@
   [../../docs/capacity-baseline-report.md](../../docs/capacity-baseline-report.md)；
 - 被测环境带监控启动：`docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml up -d --build`；
 - 不要叠加 `docker-compose.tracing.yml`（agent 有开销）；
-- 每轮压测时 Grafana 时间范围对准压测窗口，截图「容量」「JVM 与连接池」「Redis」「MySQL」「Kafka」几组面板存档。
+- 每轮压测时 Grafana 时间范围对准压测窗口，截图「容量」「JVM 与连接池」「Redis」「PostgreSQL」「Kafka」几组面板存档。
+
+> 2026-11-24 之前的基线数字是在 MySQL 8 上测的；项目已迁移到 PostgreSQL 16，下面的命令都是 PostgreSQL 版本，
+> 历史数字不能直接和 PostgreSQL 上的新结果对比（引擎、索引结构、热点行锁实现都不同），需要重测。
 
 工具：`component-bench.sh` 需要 bash + docker；`baseline.py`、`capacity_model.py`、`seed_data.py` 只用标准库，需要 Python 3.12+；JMeter 5.5+。
 
@@ -28,20 +31,23 @@
 正式基线要先把数据量灌到目标规模（默认 100 万用户 / 10 万店铺 / 1000 万订单，约 3–4 GB）：
 
 ```bash
-python perf/baseline/seed_data.py --buffer-pool-gb 4          # 默认规模；缓冲池按机器内存的 50–70% 给
+python perf/baseline/seed_data.py --shared-buffers-gb 4       # 默认规模；shared_buffers 按机器内存的 25–40% 给（改完要重启 postgres，见下）
 python perf/baseline/seed_data.py --users 100000 --shops 10000 --orders 1000000   # 1/10 规模试跑
 ```
 
-- 数据由 MySQL 服务端 `INSERT ... SELECT` 生成，客户端是一次性容器，连接参数与 `component-bench.sh` 通用（`NET`、`MYSQL_HOST` 等）；
+- 数据由 PostgreSQL 服务端 `INSERT ... SELECT ... generate_series()` 生成，客户端是一次性 `postgres:16.4` 容器里的 psql，连接参数与 `component-bench.sh` 通用（`NET`、`PG_HOST`、`PG_PORT` 等）；
 - 可重复执行、可中断续跑（进度记在 `seed_progress` 表），调大目标后重跑只补差额，不会删数据；
   但分几次调大 `--orders` 补出来的订单，时间分布和主键顺序与一次灌满的不同，要对比基线就在空库上一次灌到目标规模；
 - 同时生成笔记、关注关系（含粉丝数万的大 V）、优惠券，以及 Redis 里的店铺坐标和关注收件箱，混合场景的每个接口都有数据可读；
 - 订单没有「未支付」状态、秒杀券活动都已结束，不会触发超时关单，也不会拖慢应用启动；
-- 灌数默认不写 binlog（有从库或托管数据库不允许时加 `--keep-binlog`）。
+- 灌数会话设 `synchronous_commit = off`（提交不等 WAL 刷盘，进度与数据同事务，断电后重跑即可续上）；PostgreSQL 无法关闭 WAL，所以没有 MySQL 版的 `--keep-binlog`。
 
 灌完后**重启 app**（布隆过滤器启动时预热；不重启也会在 1 分钟内由定时增量同步补上）、重新生成 token，压测时加 `--prop SHOP_MAX=100000`。
-MySQL 默认的 `innodb_buffer_pool_size` 只有 128M，放不下这些数据；`--buffer-pool-gb` 的修改重启后失效，
-正式压测要把它写进 MySQL 启动参数，否则测的是磁盘而不是数据库。
+PostgreSQL 默认的 `shared_buffers` 只有 128M，放不下这些数据。它不能在线修改：`--shared-buffers-gb`（旧名 `--buffer-pool-gb`）
+只会执行 `ALTER SYSTEM SET shared_buffers` 写入 `postgresql.auto.conf` 并提示退出，
+需要 `docker restart hmdp-postgres` 后再重跑本命令；如果 compose 用 `command: -c shared_buffers=...` 启动，命令行参数优先，要直接改 compose。
+正式压测务必调大，否则测的是磁盘而不是数据库。
+灌完后脚本会对各表 `ANALYZE`，让规划器拿到准确的统计信息。
 
 > `RedisBloomFilter` 的设计容量默认 100 万家店铺（`BLOOM_EXPECTED_INSERTIONS`），启动日志会打印填充率和估算误判率，
 > 店铺数超过设计容量时告警。灌数后可以用 `python perf/baseline/bloom_check.py --shops 100000` 检查：
@@ -50,29 +56,32 @@ MySQL 默认的 `innodb_buffer_pool_size` 只有 128M，放不下这些数据；
 ## 第 1 步：组件单测
 
 ```bash
-bash perf/baseline/component-bench.sh              # redis mysql kafka 全部
+bash perf/baseline/component-bench.sh              # redis pg kafka 全部
 bash perf/baseline/component-bench.sh redis        # 只测 Redis
-SYSBENCH=1 bash perf/baseline/component-bench.sh mysql   # 额外跑 sysbench oltp_point_select / oltp_write_only
+PGBENCH_STD=1 bash perf/baseline/component-bench.sh pg    # 额外跑 pgbench 自带的 tpcb-like / select-only（scale=10，独立库 pgbench_std）
 ```
 
 | 组件 | 测什么 | 工具 |
 | --- | --- | --- |
 | Redis | GET、HGETALL（登录态）、SISMEMBER（是否关注）、`EVALSHA seckill.lua`（随机 userId 抢同一张券）、点赞 Lua | redis-benchmark |
-| MySQL | 主键点查、热门笔记、超时关单扫描、热点行 `stock = stock - 1` 与 `- 24`、24 行多值 INSERT | sysbench + `sql-bench.lua` 执行业务真实 SQL |
+| PostgreSQL | 主键点查、热门笔记、超时关单扫描（走部分索引 `WHERE status = 1`）、热点行 `stock = stock - 1` 与 `- 24`、24 行多值 INSERT | pgbench（`-M prepared -f`）执行业务真实 SQL，P95 由 `--log` 的逐事务耗时算出 |
 | Kafka | 12 分区 topic，`acks=all` + 幂等生产、消费吞吐 | kafka-producer/consumer-perf-test |
 
-测试数据全部隔离并在结束后清理（Redis `bench:*` 与券 999999 的 key、MySQL 券 999999 + `bench_voucher_order` 表 + 临时账号 `bench`、Kafka `bench.perf`）。
+测试数据全部隔离并在结束后清理（Redis `bench:*` 与券 999999 的 key、PostgreSQL 券 999999 + `bench_voucher_order` 表与 `bench_id_seq` 序列、Kafka `bench.perf`）。
+压 SQL 用 pgbench 而不是 sysbench：pgbench 随 `postgres:16.4` 镜像提供，版本与被测库一致，自带 `-c/-j/-T`、预编译协议和逐事务日志；
+也不需要像 MySQL 那样临时建账号，直接用 `PG_USER`（默认 postgres）。
 被测组件在另一台机器时：
 
 ```bash
-NET=host REDIS_HOST=10.0.0.5 REDIS_PORT=6380 MYSQL_HOST=10.0.0.5 MYSQL_PORT=3307 \
+NET=host REDIS_HOST=10.0.0.5 REDIS_PORT=6380 PG_HOST=10.0.0.5 PG_PORT=5433 \
 KAFKA_BOOTSTRAP=10.0.0.5:9094 bash perf/baseline/component-bench.sh
 ```
 
 > 跨机测 Kafka 用它的对外监听器 `<中间件机 IP>:9094`（由 `KAFKA_EXTERNAL_HOST` 指定对外地址），不要用 9092。
 > 分机部署的完整步骤见 [../../docs/bench-deploy.md](../../docs/bench-deploy.md)。
 
-可调参数：`REDIS_N`、`REDIS_CLIENTS`、`MYSQL_CONCURRENCY`、`MYSQL_TIME`、`KAFKA_RECORDS`、`KAFKA_RECORD_SIZE`。
+可调参数：`REDIS_N`、`REDIS_CLIENTS`、`PG_CONCURRENCY`、`PG_TIME`、`KAFKA_RECORDS`、`KAFKA_RECORD_SIZE`；
+连接与镜像：`PG_HOST`（默认 `postgres`）、`PG_PORT`（容器网络内默认 5432，宿主机映射端口默认 5433）、`PG_USER`、`PG_PASSWORD`、`PG_DB`、`PG_IMAGE`。
 
 ## 第 2 步：单实例找拐点
 
@@ -103,10 +112,11 @@ python perf/baseline/baseline.py scale --jmx perf/mixed-bench.jmx --token-file t
 
 脚本依次 `--scale app=N`、等所有副本 healthy、重启网关、预热 15s，再正式压测。
 `扩展效率 = N 副本 QPS ÷ (N × 单副本 QPS)`，**哪一级之后效率掉到 0.7 以下，就说明某个共享组件到顶了**——
-对照同一时段的 Redis CPU、MySQL 行锁 / 连接数、Kafka lag、Hikari pending，先饱和的就是改造的第一优先级。
+对照同一时段的 Redis CPU、PostgreSQL 锁等待会话（`pg_lock_waiting_sessions`）/ 连接数（`pg_stat_database_numbackends`）、Kafka lag、Hikari pending，先饱和的就是改造的第一优先级。
 
 - `--threads` 要大到能压满最大副本数（例如单副本拐点并发 × 最大副本数），否则高副本数时是压力不够而不是效率低；
-- MySQL `max_connections` 默认 151，8 副本 × `DB_POOL_MAX=30` = 240 会超，先调小 `DB_POOL_MAX` 或调大 `max_connections`；
+- PostgreSQL `max_connections` 默认 100（每个连接是一个后端进程，开销比 MySQL 线程大），4 副本 × `DB_POOL_MAX=30` = 120 就会超，
+  先调小 `DB_POOL_MAX`、调大 `max_connections`，副本多时在应用与库之间加 PgBouncer；上限看 Prometheus 的 `pg_conn_limit_max_connections`；
 - 压测机在另一台机器、无法操作被测机的 docker 时加 `--manual-scale`，每轮前按提示手动调副本数。
 
 ## 第 4 步：混合场景

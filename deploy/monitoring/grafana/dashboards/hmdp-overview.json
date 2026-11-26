@@ -1810,7 +1810,7 @@
     },
     {
       "type": "row",
-      "title": "MySQL",
+      "title": "PostgreSQL",
       "id": 34,
       "collapsed": false,
       "gridPos": {
@@ -1823,7 +1823,7 @@
     },
     {
       "type": "timeseries",
-      "title": "QPS / TPS",
+      "title": "事务 / 语句速率",
       "id": 35,
       "gridPos": {
         "h": 8,
@@ -1835,12 +1835,12 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "TPS = 提交 + 回滚事务速率；语句 = pg_stat_statements 记录的语句执行速率（只含前 100 条耗时最高的语句，偏低估）",
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(mysql_global_status_questions[1m])",
-          "legendFormat": "QPS",
+          "expr": "sum(rate(pg_stat_database_xact_commit{datname=\"hmdp\"}[1m]) + rate(pg_stat_database_xact_rollback{datname=\"hmdp\"}[1m]))",
+          "legendFormat": "TPS",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1848,8 +1848,8 @@
         },
         {
           "refId": "B",
-          "expr": "sum(rate(mysql_global_status_commands_total{command=~\"commit|rollback\"}[1m]))",
-          "legendFormat": "TPS",
+          "expr": "sum(rate(pg_stat_statements_calls_total[1m]))",
+          "legendFormat": "语句/s",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1889,7 +1889,7 @@
     },
     {
       "type": "timeseries",
-      "title": "语句类型",
+      "title": "元组读写速率",
       "id": 36,
       "gridPos": {
         "h": 8,
@@ -1901,12 +1901,39 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "fetched = 索引 / 表扫描取回的行；inserted / updated / deleted = 写入行数",
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(mysql_global_status_commands_total{command=~\"select|insert|update|delete\"}[1m])",
-          "legendFormat": "{{command}}",
+          "expr": "sum(rate(pg_stat_database_tup_fetched{datname=\"hmdp\"}[1m]))",
+          "legendFormat": "fetched",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(pg_stat_database_tup_inserted{datname=\"hmdp\"}[1m]))",
+          "legendFormat": "inserted",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(pg_stat_database_tup_updated{datname=\"hmdp\"}[1m]))",
+          "legendFormat": "updated",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "sum(rate(pg_stat_database_tup_deleted{datname=\"hmdp\"}[1m]))",
+          "legendFormat": "deleted",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1946,7 +1973,7 @@
     },
     {
       "type": "timeseries",
-      "title": "连接",
+      "title": "连接与活跃会话",
       "id": 37,
       "gridPos": {
         "h": 8,
@@ -1962,7 +1989,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "mysql_global_status_threads_connected",
+          "expr": "sum(pg_stat_database_numbackends)",
           "legendFormat": "connected",
           "datasource": {
             "type": "prometheus",
@@ -1971,8 +1998,8 @@
         },
         {
           "refId": "B",
-          "expr": "mysql_global_status_threads_running",
-          "legendFormat": "running",
+          "expr": "pg_activity_active_backends",
+          "legendFormat": "active",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -1980,7 +2007,7 @@
         },
         {
           "refId": "C",
-          "expr": "mysql_global_variables_max_connections",
+          "expr": "pg_conn_limit_max_connections",
           "legendFormat": "max_connections",
           "datasource": {
             "type": "prometheus",
@@ -2021,7 +2048,7 @@
     },
     {
       "type": "timeseries",
-      "title": "行锁等待",
+      "title": "锁等待与死锁",
       "id": 38,
       "gridPos": {
         "h": 8,
@@ -2037,8 +2064,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(mysql_global_status_innodb_row_lock_waits[1m])",
-          "legendFormat": "waits/s",
+          "expr": "pg_lock_waiting_sessions",
+          "legendFormat": "等锁会话数",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2046,8 +2073,8 @@
         },
         {
           "refId": "B",
-          "expr": "rate(mysql_global_status_innodb_row_lock_time[1m]) / 1000",
-          "legendFormat": "等待时间（秒/秒）",
+          "expr": "sum(rate(pg_stat_database_deadlocks{datname=\"hmdp\"}[1m]))",
+          "legendFormat": "死锁/s",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2087,7 +2114,7 @@
     },
     {
       "type": "timeseries",
-      "title": "慢查询（>200ms）",
+      "title": "最长活跃语句（秒）",
       "id": 39,
       "gridPos": {
         "h": 8,
@@ -2099,12 +2126,21 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "当前仍在执行的语句里耗时最长的一条；PostgreSQL 没有慢查询计数器，慢语句明细看容器日志（log_min_duration_statement=200）",
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(mysql_global_status_slow_queries[1m])",
-          "legendFormat": "slow/s",
+          "expr": "pg_activity_max_active_seconds",
+          "legendFormat": "最长活跃语句",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "pg_activity_idle_in_transaction_backends",
+          "legendFormat": "事务内空闲会话",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
@@ -2113,7 +2149,7 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "s",
           "custom": {
             "lineWidth": 1,
             "fillOpacity": 10,
@@ -2156,12 +2192,12 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "",
+      "description": "按 queryid 区分（pg_stat_statements 只导出耗时最高的 100 条）；语句文本用 psql 查 pg_stat_statements 对照",
       "targets": [
         {
           "refId": "A",
-          "expr": "topk(8, rate(mysql_perf_schema_events_statements_seconds_total[5m]) / rate(mysql_perf_schema_events_statements_total[5m]))",
-          "legendFormat": "{{digest_text}}",
+          "expr": "topk(8, sum by (queryid) (rate(pg_stat_statements_seconds_total[5m])) / sum by (queryid) (rate(pg_stat_statements_calls_total[5m])))",
+          "legendFormat": "{{queryid}}",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"

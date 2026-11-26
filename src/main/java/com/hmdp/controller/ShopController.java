@@ -73,7 +73,8 @@ public class ShopController {
     ) {
         // 根据类型分页查询
         Page<Shop> page = shopService.query()
-                .like(StrUtil.isNotBlank(name), "name", name)
+                // ILIKE：PG 的 LIKE 区分大小写，沿用原 MySQL（utf8mb4_general_ci）不区分大小写的搜索行为
+                .apply(StrUtil.isNotBlank(name), "name ILIKE {0}", "%" + name + "%")
                 .page(new Page<>(current, SystemConstants.MAX_PAGE_SIZE));
         // 返回数据
         return Result.ok(page.getRecords());

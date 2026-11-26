@@ -1,5 +1,5 @@
 # ========== sun_life 链路追踪（SkyWalking，阶段 3-1 监控体系） ==========
-# 用途：定位慢接口耗在 Redis、MySQL 还是 Kafka 哪一段。Java agent 零侵入，不改业务代码。
+# 用途：定位慢接口耗在 Redis、PostgreSQL 还是 Kafka 哪一段。Java agent 零侵入，不改业务代码。
 # 与主编排（可再叠加监控编排）一起使用：
 #   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml \
 #                  -f deploy/docker-compose.tracing.yml up -d --build

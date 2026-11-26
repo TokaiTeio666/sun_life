@@ -7,7 +7,7 @@
 # 抓取目标：
 #   app 各副本  app:9081/actuator/prometheus（Docker DNS 自动发现所有副本，扩缩容无需改配置）
 #   Redis       redis-exporter:9121
-#   MySQL       mysqld-exporter:9104
+#   PostgreSQL  postgres-exporter:9187
 #   Kafka       kafka-exporter:9308（消费组 lag、DLT 消息数）
 
 services:
@@ -59,23 +59,24 @@ services:
       redis:
         condition: service_healthy
 
-  mysqld-exporter:
+  postgres-exporter:
     restart: unless-stopped
-    image: prom/mysqld-exporter:v0.15.1
-    container_name: hmdp-mysqld-exporter
-    # 本地演示直接用 root；生产应建只读账号：
-    #   CREATE USER 'exporter'@'%' IDENTIFIED BY '...' WITH MAX_USER_CONNECTIONS 3;
-    #   GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: hmdp-postgres-exporter
+    # 本地演示直接用 postgres 超级用户；生产应建只读账号并授予 pg_monitor 角色：
+    #   CREATE USER exporter PASSWORD '...'; GRANT pg_monitor TO exporter;
     command:
-      - --mysqld.address=${APP_MYSQL_ADDR:-mysql:3306}
-      - --mysqld.username=root
-      - --collect.info_schema.innodb_metrics
-      - --collect.perf_schema.eventsstatements
-      - --collect.perf_schema.eventsstatements.limit=50
+      - --collector.stat_statements
+      # 自定义指标：等锁会话数、活跃会话数、连接数上限
+      - --extend.query-path=/etc/postgres-exporter/queries.yaml
     environment:
-      MYSQLD_EXPORTER_PASSWORD: "${MYSQL_ROOT_PASSWORD:-123456}"
+      DATA_SOURCE_URI: "${APP_PG_ADDR:-postgres:5432}/hmdp?sslmode=disable"
+      DATA_SOURCE_USER: postgres
+      DATA_SOURCE_PASS: "${POSTGRES_PASSWORD:-123456}"
+    volumes:
+      - ./monitoring/postgres-exporter/queries.yaml:/etc/postgres-exporter/queries.yaml:ro
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
 
   kafka-exporter:

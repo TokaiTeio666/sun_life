@@ -1,14 +1,16 @@
-# 连接池：MySQL 与 Redis
+# 连接池：PostgreSQL 与 Redis
+
+> 2026-11 数据库由 MySQL 8 迁移到 PostgreSQL 16，本文已按 PG 更新；背景案例发生在 MySQL 时期，与数据库无关。
 
 > 背景：2026-11-24 在 i5 本机压测时发现，热门笔记与关注 Feed 并发越高 QPS 越低，根因是 Redis 连接池 `max-idle` 小于 `max-active`，
 > 导致连接被反复新建。修复记录见 [behavior-changes.md](../behavior-changes.md) 第 3 节。本文整理背后的原理与调参方法。
 
 ## 1. 为什么需要连接池
 
-应用访问 MySQL / Redis 都要经过一条 TCP 连接。新建一条连接的成本远高于执行一条命令：
+应用访问 PostgreSQL / Redis 都要经过一条 TCP 连接。新建一条连接的成本远高于执行一条命令：
 
 1. TCP 三次握手；
-2. 协议初始化：MySQL 握手与认证、选库、设置字符集；Redis 的 `HELLO` / `AUTH` / `SELECT`；
+2. 协议初始化：PG 认证（SCRAM）、服务端为这条连接 fork 一个后端进程并加载会话状态；Redis 的 `HELLO` / `AUTH` / `SELECT`；
 3. 关闭时四次挥手，主动关闭的一方还要在 `TIME_WAIT` 状态停留一段时间，占着本地端口。
 
 一条 Redis `GET` 只要几微秒，建一次连接是它的几十到几百倍。每个请求现建现关，CPU 就主要耗在建连接上。
@@ -22,17 +24,19 @@
                 └─ 已到上限     → 排队等别人归还（超过等待时间就报错）
 ```
 
-## 2. MySQL 与 Redis 的关键区别：一条连接能否同时服务多个请求
+## 2. PostgreSQL 与 Redis 的关键区别：一条连接能否同时服务多个请求
 
-### MySQL：一条连接同一时间只能执行一条 SQL
+### PostgreSQL：一条连接同一时间只能执行一条 SQL
 
 ```
 连接1: [请求A 的 SQL ......等结果......] [请求B 的 SQL ...]
 ```
 
-- MySQL 协议是一问一答：发出 SQL 后必须等结果返回，这条连接才能执行下一条；
+- PG 协议是一问一答：发出 SQL 后必须等结果返回，这条连接才能执行下一条；
 - 连接上带有状态：事务、会话变量、字符集。一个事务从开始到提交必须一直占着同一条连接；
-- 所以**每个正在查库的请求都要独占一条连接**，池子大小直接决定了同时能有多少个请求在查库。
+- 所以**每个正在查库的请求都要独占一条连接**，池子大小直接决定了同时能有多少个请求在查库；
+- PG 是**每个连接一个后端进程**（MySQL 是一个线程），每个进程常驻几 MB 内存，排序 / 哈希还会按 `work_mem` 另外申请，
+  空闲连接也不是免费的。连接数上到几百时，通常在应用和 PG 之间加 PgBouncer（transaction 模式）复用后端连接。
 
 ### Redis（Lettuce 客户端）：一条连接可以给很多请求共用
 
@@ -53,7 +57,7 @@
 
 ## 3. 两个连接池的实现差异
 
-| | MySQL：HikariCP | Redis：commons-pool2（Lettuce 使用） |
+| | PostgreSQL：HikariCP | Redis：commons-pool2（Lettuce 使用） |
 | --- | --- | --- |
 | 多余的空闲连接何时关闭 | 空闲超过 `idle-timeout`（项目里 10 分钟）才关闭 | **归还时空闲数超过 `max-idle` 就立刻关闭** |
 | 维持最少空闲连接 | 自动补足 | 要靠定时巡检（`time-between-eviction-runs`）才会补 |
@@ -89,14 +93,14 @@
 
 例：每秒 2,000 次查库、每次占用 5 ms → 平均 10 条连接在用；再留 2–3 倍余量应付高峰。
 
-### MySQL（HikariCP，`spring.datasource.hikari.*`）
+### PostgreSQL（HikariCP，`spring.datasource.hikari.*`）
 
 | 参数 | 项目当前值 | 怎么定 |
 | --- | --- | --- |
-| `maximum-pool-size` | `${DB_POOL_MAX:30}` | **不是越大越好**。按 Little 定律估算再留余量；连接过多会让 MySQL 在线程切换、锁竞争上消耗更多。硬约束：**所有副本的连接数之和 < MySQL `max_connections`**（默认 151；30 × 4 副本 = 120 已接近上限） |
+| `maximum-pool-size` | `${DB_POOL_MAX:30}` | **不是越大越好**。按 Little 定律估算再留余量；连接过多会让 PG 在进程调度、锁竞争和内存上消耗更多。硬约束：**所有副本的连接数之和 < PG `max_connections`**（本项目默认 100，见 `PG_MAX_CONNECTIONS`；其中 3 个留给超级用户。30 × 3 副本 = 90 已接近上限） |
 | `minimum-idle` | 10 | 长期高流量的服务，HikariCP 官方建议等于最大值（固定大小池）；流量起伏大时可以小一些以节省连接 |
 | `connection-timeout` | `${DB_CONN_TIMEOUT_MS:800}` | 借不到连接时最多等多久。设短一些让过载时快速失败（配合 DbGate 返回 503），避免请求越积越多 |
-| `max-lifetime` | 1800000（30 分钟） | 必须**短于** MySQL `wait_timeout`（默认 8 小时）以及中间网络设备的空闲断连时间，否则会拿到已被对端断开的连接 |
+| `max-lifetime` | 1800000（30 分钟） | 必须**短于**数据库侧和中间网络设备（负载均衡、NAT、PgBouncer 的 `server_lifetime` 等）的空闲断连时间，否则会拿到已被对端断开的连接。PG 默认不主动断开空闲连接（`idle_session_timeout=0`） |
 | `idle-timeout` | 600000（10 分钟） | 只在 `minimum-idle` 小于最大值时生效 |
 
 ### Redis（Lettuce + commons-pool2，`spring.data.redis.lettuce.pool.*`）
@@ -111,7 +115,7 @@
 
 ## 5. 怎么判断参数是否合适
 
-### MySQL
+### PostgreSQL
 
 看 Grafana「JVM 与连接池」面板（指标说明见 [monitoring.md](../monitoring.md)）：
 
@@ -119,7 +123,8 @@
 | --- | --- |
 | `hikaricp_connections_pending` 长期 > 0 | 连接不够用，或 SQL 太慢占着连接不放 |
 | `hikaricp_connections_timeout_total` 在增长 | 已经有请求借不到连接而报错 |
-| 活跃连接数长期远低于上限 | 可以调小，把 MySQL 的连接名额留给其他副本 |
+| 活跃连接数长期远低于上限 | 可以调小，把 PG 的连接名额留给其他副本 |
+| `pg_stat_database_numbackends` 接近 `pg_conn_limit_max_connections` | 所有副本加起来快把 PG 连接占满，先调小池，再考虑 PgBouncer |
 
 ### Redis
 
@@ -136,7 +141,7 @@ docker exec hmdp-redis redis-cli INFO clients | grep connected_clients          
 
 ## 6. 速查
 
-- MySQL 连接**独占**，池大小 = 同时查库的并发上限，要和 `max_connections` 一起算；
+- PG 连接**独占**且每个连接一个进程，池大小 = 同时查库的并发上限，要和 `max_connections`（默认 100）一起算；
 - Redis（Lettuce）普通命令**共享一条连接**，池只给 pipeline / 事务 / 阻塞命令用；
 - commons-pool2 的 `max-idle` **必须等于** `max-active`；
 - 等待超时（`connection-timeout` / `max-wait`）宜短，过载时快速失败；

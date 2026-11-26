@@ -2,7 +2,7 @@
 <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
   <hashTree>
     <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="商铺详情接口压测" enabled="true">
-      <stringProp name="TestPlan.comments">GET /shop/1：布隆过滤器 + 缓存前后 P99 对比。cache=false 时应用直查 MySQL。</stringProp>
+      <stringProp name="TestPlan.comments">GET /shop/1：布隆过滤器 + 缓存前后 P99 对比。cache=false 时应用直查 PostgreSQL。</stringProp>
       <boolProp name="TestPlan.functional_mode">false</boolProp>
       <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
       <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="用户定义的变量" enabled="true">

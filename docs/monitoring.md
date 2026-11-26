@@ -6,7 +6,7 @@
 ## 1. 启动
 
 ```bash
-# 业务 + 监控（Prometheus / Grafana / redis_exporter / mysqld_exporter / kafka-exporter）
+# 业务 + 监控（Prometheus / Grafana / redis_exporter / postgres-exporter / kafka-exporter）
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.yml up -d --build
 
 # 再加容器级 CPU / 内存（cAdvisor，需要 Linux 或 Docker Desktop 的 WSL2 后端）
@@ -38,9 +38,9 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | --- | --- | --- |
 | 应用 | Actuator + Micrometer | `http_server_requests_seconds_*`（按接口的 QPS / 错误 / 直方图分位数）、`jvm_*`、`tomcat_threads_busy_threads`、`hikaricp_connections_{active,pending}`、`lettuce_command_completion_seconds_*`、Kafka 客户端指标 |
 | Redis | redis_exporter | ops/s、主线程 CPU、内存、命中率、慢查询、连接数、`seckill:order:*` 集合大小 |
-| MySQL | mysqld_exporter + 慢查询日志 | QPS / TPS、行锁等待、连接数、慢查询（`long_query_time=200ms`）、perf_schema Top SQL |
+| PostgreSQL | postgres-exporter（:9187，开启 `stat_statements` 采集器 + `deploy/monitoring/postgres-exporter/queries.yaml` 自定义查询）+ 慢语句日志 | TPS（`pg_stat_database_xact_*`）、元组读写、连接数（`pg_stat_database_numbackends` / `pg_conn_limit_max_connections`）、活跃会话（`pg_activity_active_backends`）、锁等待会话（`pg_lock_waiting_sessions`）、死锁、最长活跃语句（`pg_activity_max_active_seconds`）、Top SQL（`pg_stat_statements_*`） |
 | Kafka | kafka-exporter | 每个分区的 offset（流入速率）、消费组 lag、DLT 消息数 |
-| 链路 | SkyWalking agent | 单个请求在 Redis / MySQL / Kafka 各段的耗时 |
+| 链路 | SkyWalking agent | 单个请求在 Redis / PostgreSQL / Kafka 各段的耗时 |
 | 业务 | 自定义 Micrometer（`com.hmdp.metrics`） | 见下表 |
 
 > **虚拟线程下的线程指标**：应用默认用 JDK 21 虚拟线程处理请求（`VIRTUAL_THREADS=false` 可关闭），这时 Tomcat 没有线程池，
@@ -86,9 +86,9 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 2. **应用 RED**：按接口的 QPS、4xx/5xx、P95、P99；
 3. **容量**：各副本 QPS、扩展效率（顶部变量 `single_qps` 填单副本拐点 QPS）、在途请求 vs Tomcat 线程（Little 定律）；
 4. **JVM 与连接池**：Tomcat 繁忙线程、Hikari active / pending / 获取耗时、堆、GC、CPU、Lettuce 命令耗时、**每请求 Redis 命令数**；
-5. **Redis**、6. **MySQL**、7. **Kafka**、8. **秒杀业务**。
+5. **Redis**、6. **PostgreSQL**、7. **Kafka**、8. **秒杀业务**。
 
-「每请求 Redis 命令数」和「MySQL QPS ÷ 接口 QPS」就是容量模型（`perf/baseline/capacity_model.py`）的输入。
+「每请求 Redis 命令数」和「PG 语句数/s（`pg_stat_statements_calls_total` 速率）÷ 接口 QPS」就是容量模型（`perf/baseline/capacity_model.py`）的输入。
 
 在 UI 里改过看板后，用 Dashboard → Share → Export 导出 JSON 覆盖回仓库文件。
 
@@ -103,22 +103,24 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.monitoring.
 | --- | --- | --- | --- |
 | AppInstanceDown | P0 | `docker compose ps`、该实例日志 | nginx 已自动摘除；确认剩余副本 QPS 未超安全容量，不够就先扩副本 |
 | HighErrorRate | P1 | RED 面板定位接口 → 日志 / SkyWalking | 下游故障按对应存储告警处理；发布引起的直接回滚 |
-| HighP99Latency | P1 | 同时段 Hikari pending、Redis CPU、MySQL 行锁 | 找到先饱和的组件；临时手段：扩副本、网关限流 |
-| HikariPoolPending | P1 | MySQL 慢查询 / 行锁、Hikari 获取耗时 | DB 慢就先查 SQL；DB 不慢而池小，按 `副本数 × 池 < max_connections` 调 `DB_POOL_MAX` |
-| OverloadShedding | P1 | `reason` 标签、MySQL 慢查询、缓存命中率 | `db_gate`：回源并发超过许可数，先查 DB 为什么慢 / 缓存为什么没命中；`db_conn_timeout`：没走并发闸的接口在等连接。确认是容量不足再扩副本或调 `DB_GATE_PERMITS` |
+| HighP99Latency | P1 | 同时段 Hikari pending、Redis CPU、PG 锁等待 | 找到先饱和的组件；临时手段：扩副本、网关限流 |
+| HikariPoolPending | P1 | PG 慢语句 / 锁等待、Hikari 获取耗时 | DB 慢就先查 SQL；DB 不慢而池小，按 `副本数 × 池 < max_connections` 调 `DB_POOL_MAX` |
+| OverloadShedding | P1 | `reason` 标签、PG 慢语句、缓存命中率 | `db_gate`：回源并发超过许可数，先查 DB 为什么慢 / 缓存为什么没命中；`db_conn_timeout`：没走并发闸的接口在等连接。确认是容量不足再扩副本或调 `DB_GATE_PERMITS` |
 | TomcatThreadsSaturated | P2 | 在途请求 vs 线程面板 | 线程都在等下游 → 修下游；确实是 CPU 不够 → 扩副本 |
 | JvmHeapHigh | P2 | GC 面板、堆走势 | 持续上涨疑似泄漏，dump 分析；平稳偏高则调 `-Xmx` |
 | **SeckillOversellRisk** | P0 | 库存面板、`tb_voucher_order` 计数 | DB 比 Redis 扣得多：暂停该券（改 `end_time`），对账后修正 Redis 库存 |
 | SeckillStockGapNotConverging | P1 | 发送失败计数、应用日志「回滚」 | lag 已清零但 DB 仍多：有订单在 Lua 扣减后丢失，按 `seckill:order:{id}` 与订单表比对补单或回补库存 |
-| SeckillConsumerLagGrowing | P1 | 批量聚合度、MySQL 行锁等待 | 消费写库跟不上：确认聚合度正常；`实例数 × concurrency ≤ 分区数` 内加消费者 |
+| SeckillConsumerLagGrowing | P1 | 批量聚合度、PG 锁等待 | 消费写库跟不上：确认聚合度正常；`实例数 × concurrency ≤ 分区数` 内加消费者 |
 | SeckillDeadLetter | P1 | 应用日志「秒杀订单进入死信」 | 看失败原因，修复后从 DLT 重放 |
 | SeckillSendRollbackFailed | P0 | 应用日志「库存回滚失败」 | 按日志里的 voucherId / userId 人工对账 |
 | SeckillDbStockShort | P1 | 库存面板 | Redis 库存比 DB 多（如手工改过 DB），以 DB 为准重设 Redis |
-| RedisDown / MySQLDown | P0 | 容器状态、宿主机资源 | 恢复服务；阶段 3-2 批次 C/D 之前它们都是单点 |
+| RedisDown / PostgresDown | P0 | 容器状态、宿主机资源 | 恢复服务；阶段 3-2 批次 C/D 之前它们都是单点 |
 | RedisCpuHigh | P1 | 命令耗时 Top、慢查询 | 单线程上限：先减命令数（登录态本地缓存、售罄标记），再考虑 Cluster |
 | RedisMemoryHigh / RedisBigKey | P2 | `redis_key_size` | 清理过期活动的 `seckill:order:*`；大 key 分桶 |
-| MySQLConnectionsHigh | P1 | 副本数 × `DB_POOL_MAX` | 调小池或调大 `max_connections`，再扩副本 |
-| MySQLSlowQueries / MySQLRowLockWaits | P2 | Top SQL 面板、`slow.log` | `EXPLAIN` 补索引；热点行看批量聚合度 |
+| PostgresConnectionsHigh | P1 | 副本数 × `DB_POOL_MAX` | PG 每个连接一个进程，优先调小池；确需更多连接再调 `PG_MAX_CONNECTIONS` 或加 PgBouncer（transaction 模式），再扩副本 |
+| PostgresLockWaits / PostgresDeadlocks | P2 | 锁等待与死锁面板、Top SQL 面板、慢语句日志 | `EXPLAIN` 补索引；热点行看批量聚合度；死锁看日志里的两条语句加锁顺序 |
+| PostgresExporterDown | P2 | exporter 日志 | PG 相关告警此时失效，尽快恢复 |
 | KafkaExporterDown | P2 | exporter 日志 | lag / DLT 告警此时失效，尽快恢复 |
 
-慢查询日志在 MySQL 容器内：`docker exec hmdp-mysql tail -f /var/lib/mysql/slow.log`。
+PG 没有「慢查询次数」计数器，所以没有慢查询告警：超过 200ms 的语句（`log_min_duration_statement=200`）写在容器日志里，
+`docker logs -f hmdp-postgres`；按耗时排序的语句见 Top SQL 面板，或 `SELECT query, calls, mean_exec_time FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT 10;`。

@@ -23,13 +23,14 @@ spring:
       pool:
         size: 4
   datasource:
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    # rewriteBatchedStatements：saveBatch 真正合并成多值 INSERT（秒杀批量落库依赖）
-    url: jdbc:mysql://127.0.0.1:3306/hmdp?useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
-    username: root
+    driver-class-name: org.postgresql.Driver
+    # reWriteBatchedInserts：saveBatch 真正合并成多值 INSERT（秒杀批量落库依赖）
+    # 本机直连 docker compose 里的 PG（宿主机端口默认 5433，见 deploy/docker-compose.yml 的 PG_PORT）
+    url: jdbc:postgresql://127.0.0.1:5433/hmdp?reWriteBatchedInserts=true
+    username: postgres
     password: 123456
     hikari:
-      # 经验值：连接数 ≈ CPU 核数 × 2 + 有效磁盘数；多实例时注意 实例数 × 该值 < MySQL max_connections
+      # 经验值：连接数 ≈ CPU 核数 × 2 + 有效磁盘数；多实例时注意 实例数 × 该值 < PostgreSQL max_connections
       maximum-pool-size: ${DB_POOL_MAX:30}
       minimum-idle: 10
       # 等连接的最长时间。过载时与其让请求排 3s 再失败，不如 800ms 就返回 503（见 WebExceptionAdvice）；

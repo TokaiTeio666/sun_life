@@ -1,7 +1,6 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.util.BooleanUtil;
-import cn.hutool.core.util.StrUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
@@ -83,7 +82,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.ok(local);
         }
 
-        // 布隆过滤器前置拦截：不存在的 id 不查 Redis、不打 MySQL
+        // 布隆过滤器前置拦截：不存在的 id 不查 Redis、不打数据库
         if (!bloomFilter.mightContain(id)) {
             return Result.fail("店铺不存在！");
         }
@@ -186,10 +185,18 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             distanceMap.put(shopIdStr, distance);
         });
         // 5.根据id查询Shop
-        String idStr = StrUtil.join(",", ids);
-        List<Shop> shops = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
-        for (Shop shop : shops) {
-            shop.setDistance(distanceMap.get(shop.getId().toString()).getValue());
+        // 按 GEO 返回的距离顺序（ids 的顺序）排列；在内存里排，不依赖 MySQL 的 ORDER BY FIELD
+        Map<Long, Shop> shopById = new HashMap<>(ids.size());
+        for (Shop shop : listByIds(ids)) {
+            shopById.put(shop.getId(), shop);
+        }
+        List<Shop> shops = new ArrayList<>(ids.size());
+        for (Long id : ids) {
+            Shop shop = shopById.get(id);
+            if (shop != null) {
+                shop.setDistance(distanceMap.get(id.toString()).getValue());
+                shops.add(shop);
+            }
         }
         // 6.返回
         return Result.ok(shops);

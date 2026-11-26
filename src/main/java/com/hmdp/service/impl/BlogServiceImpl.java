@@ -184,7 +184,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             int offset = (page - 1) * SystemConstants.MAX_PAGE_SIZE;
             records = listQuery()
                     .orderByDesc("liked")
-                    .last("LIMIT " + offset + "," + SystemConstants.MAX_PAGE_SIZE)
+                    .last("LIMIT " + SystemConstants.MAX_PAGE_SIZE + " OFFSET " + offset)
                     .list();
             fillBlogUsers(records);
             writeBlogCache(key, records);
@@ -256,12 +256,12 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         }
         //解析出期中的用户id
         List<Long> ids = top5.stream().map(Long::valueOf).collect(Collectors.toList());
-        String idStr = StrUtil.join(",", ids);
-        //根据用户id查询用户
-        List<UserDTO> userDTOS = userService.query()
-                .in("id",ids)
-                .last("ORDER BY FIELD(id,"+idStr+")").list()
-                .stream()
+        //根据用户id查询用户，再按点赞先后（ids 的顺序）排列；在内存里排，不依赖 MySQL 的 ORDER BY FIELD
+        Map<Long, User> userById = userService.listByIds(ids).stream()
+                .collect(Collectors.toMap(User::getId, Function.identity()));
+        List<UserDTO> userDTOS = ids.stream()
+                .map(userById::get)
+                .filter(java.util.Objects::nonNull)
                 .map(user -> BeanUtil.copyProperties(user, UserDTO.class))
                 .collect(Collectors.toList());
         return Result.ok(userDTOS);

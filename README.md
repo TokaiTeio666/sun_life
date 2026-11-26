@@ -1,6 +1,6 @@
 # sun_life（黑马点评 · 秒杀模块 Kafka 改造版）
 
-> 基于黑马程序员《Spring Boot 实战》课程项目 **hm-dianping** 二次开发。核心改造：秒杀链路从 **Redis Stream 异步下单**升级为 **Kafka 异步下单**（`acks=all` + 幂等生产者 + 手动提交 offset + 重试/DLT）；技术栈升级到 **Java 21（虚拟线程）/ Spring Boot 3 / MySQL 8 / Redis 7 / Kafka 3.7**；补齐**布隆过滤器、TTL 抖动、点赞 BitMap、UV HyperLogLog** 等缓存与统计能力。本项目用于学习与简历展示，**非独立自研项目**，改造与新增部分为本人独立完成。
+> 基于黑马程序员《Spring Boot 实战》课程项目 **hm-dianping** 二次开发。核心改造：秒杀链路从 **Redis Stream 异步下单**升级为 **Kafka 异步下单**（`acks=all` + 幂等生产者 + 手动提交 offset + 重试/DLT）；技术栈升级到 **Java 21（虚拟线程）/ Spring Boot 3 / PostgreSQL 16 / Redis 7 / Kafka 3.7**；补齐**布隆过滤器、TTL 抖动、点赞 BitMap、UV HyperLogLog** 等缓存与统计能力。本项目用于学习与简历展示，**非独立自研项目**，改造与新增部分为本人独立完成。
 
 ---
 
@@ -21,7 +21,7 @@
 | 分类 | 技术 | 用途 |
 | --- | --- | --- |
 | 基础框架 | Spring Boot 3.3.5 / Java 21 | 应用骨架；Tomcat 请求线程使用虚拟线程（`VIRTUAL_THREADS=false` 可关闭） |
-| 持久层 | MyBatis-Plus 3.5.7 / MySQL 8 | ORM 与数据存储 |
+| 持久层 | MyBatis-Plus 3.5.7 / PostgreSQL 16 | ORM 与数据存储（2026-11 由 MySQL 8 迁移，见 [docs/behavior-changes.md](docs/behavior-changes.md)） |
 | 缓存 | Redis 7（StringRedisTemplate） | 缓存、布隆过滤器、BitMap、HyperLogLog、GEO、ZSet Feed 流 |
 | 分布式锁 | Redisson 3.32.0 | 可重入锁、防重复下单、联锁（测试） |
 | **消息队列** | **Kafka 3.7（spring-kafka 3.2.4）** | **秒杀异步下单、手动提交 offset、重试 + 死信 Topic** |
@@ -48,7 +48,7 @@ flowchart TB
 
     subgraph 基础设施
         REDIS[(Redis<br/>缓存/锁/库存/Feed流/ID)]
-        DB[(MySQL<br/>业务数据)]
+        DB[(PostgreSQL<br/>业务数据)]
         MQ[(Kafka<br/>seckill.orders)]
         DLT[(Kafka<br/>seckill.orders.DLT)]
     end
@@ -92,7 +92,7 @@ sequenceDiagram
     participant K as Kafka(seckill.orders)
     participant C as SeckillOrderConsumer
     participant D as Kafka(seckill.orders.DLT)
-    participant DB as MySQL
+    participant DB as PostgreSQL
 
     U->>API: POST /voucher-order/seckill/{id}
     API->>SVC: seckillVoucher(voucherId)
@@ -123,7 +123,7 @@ sequenceDiagram
 | 重复投递（At Least Once） | 手动提交 offset + 订单 id 幂等判断 + 数据库主键 |
 | 消费并发与顺序 | 3 分区 × `concurrency=3`；userId 作消息 key，同一用户固定分区 |
 | 订单超时未支付 | Kafka 没有延迟消息，`@Scheduled` 每分钟扫描未支付订单，条件更新 `WHERE status=1` 关单并回补 DB + Redis 库存 |
-| 削峰填谷 | 接口只做 Lua + 异步 send；消费端按 MySQL 能力消费，12 万独立用户压测中 6.4 万积压约 7 分钟追平 |
+| 削峰填谷 | 接口只做 Lua + 异步 send；消费端按数据库写入能力消费，12 万独立用户压测中 6.4 万积压约 7 分钟追平 |
 
 > 已知边界：Lua 扣减成功、Kafka send 之前进程崩溃，仍会出现「扣了库存但没有订单」。
 > 彻底解决需要 outbox / 本地消息表；当前实现用发送回调补偿覆盖 Kafka 侧失败，属于课程项目的取舍。
@@ -138,7 +138,7 @@ sequenceDiagram
 | **一致性** | 先更新 DB 再删缓存，配合过期兜底 | `ShopServiceImpl#update` |
 
 布隆过滤器在应用启动时批量预热已有商铺 id（一次 pipeline 写入），新增商铺在 DB 命中后按需补写；
-不存在的 id 直接返回，不查 Redis、不打 MySQL（可用 `/shop/999999` 验证）。
+不存在的 id 直接返回，不查 Redis、不打数据库（可用 `/shop/999999` 验证）。
 
 ### 4.3 点赞 BitMap 与 UV HyperLogLog
 
@@ -169,6 +169,8 @@ sequenceDiagram
 ---
 
 ## 五、性能压测（JMeter，真实数据）
+
+> 注：本章数据均在 **MySQL 8** 上测得（2026-11 迁移到 PostgreSQL 16 之前），数据库相关的数字需要在 PG 上重新实测。
 
 ### 5.1 压测口径
 
@@ -215,6 +217,8 @@ sequenceDiagram
 
 ### 5.5 容量基线（阶段 3-1，本机受控基线）
 
+> 以下数字为 MySQL 8 时期的结果，迁移到 PostgreSQL 16 后需重新测量。
+
 > 2026-11-24 实测，数据量 10 万用户 / 1 万店铺 / 100 万订单 / 5 万笔记 / 30 万关注（149 MB）。
 > **压测机 = 被测机**：服务跑在 WSL2（16 vCPU / 20 GB），JMeter 在 Windows 宿主，共享同一颗 CPU，
 > 数字只能当这台机器的下限；分机扩展效率未测。口径、逐级数据和瓶颈归因见
@@ -238,7 +242,7 @@ sequenceDiagram
 | 秒杀 `/voucher-order/seckill/21` | 100 / 17,361 | 10.4k–12.2k | 400 并发时服务端 P99 33 ms，**压测端先到顶** |
 
 - 测试区间内第一个饱和的不是 Redis / MySQL / Kafka，而是**应用侧处理与排队**；秒杀的硬上限是单券热点行写（批量聚合后约 2k 单/s）；
-- 顺带修掉两个真问题：旧数据卷缺 `migration_v2.sql` 索引（热门笔记 799 → 148,932 次/s）、
+- 顺带修掉两个真问题：旧数据卷缺 `migration_v2.sql` 索引（MySQL 时期的补索引脚本，已随迁移删除；热门笔记 799 → 148,932 次/s）、
   nginx 1.18 + Tomcat 默认每条连接只处理 100 个请求（20k QPS 下端口耗尽，出现 1.33% `BindException`）。
 
 ### 5.6 结论（怎么向面试官讲）
@@ -265,7 +269,7 @@ sequenceDiagram
 前置：Docker Engine 20.10+ 与 compose 插件（Linux/WSL2），或 Docker Desktop（Windows/macOS），Maven 3.6+。
 
 ```bash
-# 一键启动（自动完成：编译 jar → 构建镜像 → 启动 MySQL/Redis/Kafka/应用）
+# 一键启动（自动完成：编译 jar → 构建镜像 → 启动 PostgreSQL/Redis/Kafka/应用）
 # Windows
 deploy\start.bat
 # Linux / macOS
@@ -282,7 +286,7 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 
 | 服务 | 镜像 | 说明 |
 | --- | --- | --- |
-| `mysql` | mysql:8.0 | 首次启动自动导入 `hmdp.sql` 建库建表（关闭严格模式兼容课程 SQL），数据卷 `hmdp-mysql8-data` |
+| `postgres` | postgres:16.4 | 首次启动（数据卷为空时）自动导入 `hmdp.sql` 建表与初始数据，开启 `pg_stat_statements`，数据卷 `hmdp-pg16-data` |
 | `redis` | redis:7.2 | 缓存/布隆过滤器/位图/HLL/锁/库存 |
 | `kafka` | apache/kafka:3.7.0 | KRaft 单节点，秒杀异步消息 / 重试 / DLT |
 | `app` | 本地构建（eclipse-temurin:21-jre） | Spring Boot 3 应用，无状态，可 `--scale app=N` 多副本 |
@@ -292,11 +296,11 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 > - **前端页面（推荐）**：浏览器打开 `http://localhost:8080`（nginx 托管，登录/秒杀均在页面操作）
 > - 后端 API（调试）：`http://localhost:8081`，根路径会被登录拦截器返回 401，属正常行为
 >
-> 端口映射默认避开本机冲突（MySQL 3307、Redis 6380、Kafka 9092），
+> 端口映射默认避开本机冲突（PostgreSQL 5433、Redis 6380、Kafka 9092），
 > 可在 `deploy/.env` 中修改；应用宿主端口默认 8081（`APP_PORT`）、前端端口默认 8080（`WEB_PORT`）。
 > 秒杀库存由应用启动时自动预热（见 4.1 可靠性设计 / `SeckillStockInitializer`），无需手动初始化。
 > 扩容到多副本：`docker compose -f deploy/docker-compose.yml up -d --scale app=3`，之后 `restart frontend` 让 nginx 重新解析副本。
-> 已有数据卷的环境需补索引：`docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/migration_v2.sql`。
+> 旧的 MySQL 数据卷 `hmdp-mysql8-data` 不会迁移；PG 数据卷首次启动即包含全部索引，压测数据用 `perf/baseline/seed_data.py` 重新生成。
 > 扩容路线与各阶段优化说明见 [docs/scaling-roadmap.md](docs/scaling-roadmap.md)。
 > 原理性知识笔记（连接池、拐点与安全容量等）见 [docs/knowledge/](docs/knowledge/README.md)。
 > 监控（Prometheus + Grafana + exporter，Grafana `localhost:3000`）：主编排后追加 `-f deploy/docker-compose.monitoring.yml`，
@@ -313,12 +317,12 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 | --- | --- |
 | JDK | 17 |
 | Maven | 3.6+ |
-| MySQL | 8.0+，导入 `src/main/resources/db/hmdp.sql` |
+| PostgreSQL | 16，库名 `hmdp`，导入 `src/main/resources/db/hmdp.sql`；`application.yaml` 默认连 `127.0.0.1:5433` |
 | Redis | 7.x，默认 `127.0.0.1:6379` |
 | Kafka | 3.7.x，默认 `127.0.0.1:9092` |
 
 ```bash
-# 1. 启动 MySQL / Redis / Kafka（Kafka 可直接用 perf/docker-compose-kafka.yml）
+# 1. 启动 PostgreSQL / Redis / Kafka（Kafka 可直接用 perf/docker-compose-kafka.yml）
 docker compose -f perf/docker-compose-kafka.yml up -d
 
 # 2. 编译运行（启动时自动预热秒杀库存、自动创建 Kafka topic）
@@ -342,7 +346,7 @@ java -jar target/sun_life-0.0.1-SNAPSHOT.jar
 
 ```powershell
 # 秒杀券 + Redis 库存 + 1000 个 token
-docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < perf/bench-voucher.sql
+docker exec -i hmdp-postgres psql -U postgres -d hmdp -v ON_ERROR_STOP=1 < perf/bench-voucher.sql
 docker exec hmdp-redis redis-cli SET seckill:stock:21 100000
 pwsh perf/gen_tokens.ps1 -Count 1000
 
@@ -383,7 +387,7 @@ jmeter -n -t perf/shop-detail-bench.jmx -JTHREADS=200 -JSERVER_PORT=8081 `
 | `service/impl/BlogServiceImpl.java` | 点赞 BitMap（userId 作 offset）+ 有界 ZSet TopN + 日 UV HyperLogLog + 点赞增量异步回写 |
 | `mq/LikeCountFlusher.java` | 点赞数定时批量回写 `tb_blog.liked`（改名取批、失败保留重试、Redisson 锁） |
 | `controller/BlogController.java` | 新增 `GET /blog/uv/{id}` 日 UV 查询 |
-| `pom.xml` / `application.yaml` / `deploy/Dockerfile` / `deploy/docker-compose.yml` | 升级 Java 21 / Spring Boot 3 / MySQL 8 / Redis 7，补齐 Boot 3 配置 |
+| `pom.xml` / `application.yaml` / `deploy/Dockerfile` / `deploy/docker-compose.yml` | 升级 Java 21 / Spring Boot 3 / Redis 7，数据库由 MySQL 8 迁移到 PostgreSQL 16，补齐 Boot 3 配置 |
 | `perf/gen_tokens.ps1` / `perf/bench-voucher.sql` / `perf/shop-detail-bench.jmx` | 无 Python 依赖的压测数据准备与缓存 A/B 脚本 |
 | `perf/lock-failover-demo.ps1` | 复现 Redis 主从切换导致分布式锁失效，验证 DB 唯一索引兜底的必要性 |
 
@@ -409,7 +413,7 @@ src/main/java/com/hmdp/
       [`docs/capacity-baseline-report.md`](docs/capacity-baseline-report.md)；
 - [x] 超时关单多实例互斥（Redisson 锁，集群内同一时刻只有一个实例执行）；
 - [ ] Lua 扣减成功与 Kafka 投递之间仍存在极小窗口，生产可用 outbox / 本地消息表彻底解决；
-- [x] Docker 一键启动（`deploy/`，MySQL/Redis/Kafka/应用 全容器化）。
+- [x] Docker 一键启动（`deploy/`，PostgreSQL/Redis/Kafka/应用 全容器化）。
 
 ---
 

@@ -202,7 +202,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      *
      * <p>同一批消息按 voucherId 聚合，每张券只执行一次 {@code stock = stock - n}，
      * 把热点库存行的加锁次数从 N 次降到 1 次；订单用 saveBatch 批量插入
-     * （JDBC URL 需开启 rewriteBatchedStatements）。任一步失败整批回滚，由调用方降级为逐条处理。</p>
+     * （JDBC URL 需开启 reWriteBatchedInserts）。任一步失败整批回滚，由调用方降级为逐条处理。</p>
      *
      * @return 本批实际新建的订单
      */
@@ -273,7 +273,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     /**
-     * 超时关单：分批扫描（走 idx_status_ctime 索引），每批一个独立短事务，
+     * 超时关单：分批扫描（走部分索引 idx_voucher_order_unpaid_ctime），每批一个独立短事务，
      * 库存回补按券聚合成一条 UPDATE；Redis 回补在事务提交后用 pipeline 一次完成。
      */
     @Override
@@ -283,7 +283,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         for (int batch = 0; batch < CLOSE_MAX_BATCHES; batch++) {
             List<VoucherOrder> candidates = query()
                     .select("id", "user_id", "voucher_id")
-                    .eq("status", 1)
+                    // status = 1 必须写成字面量：部分索引的条件是 WHERE status = 1，写成绑定参数 status = ? 时，
+                    // 驱动切到服务端预编译后 PG 可能用通用计划，无法证明参数等于 1，就用不上这个索引
+                    .apply("status = 1")
                     .lt("create_time", deadline)
                     .orderByAsc("create_time")
                     .last("LIMIT " + CLOSE_BATCH_SIZE)

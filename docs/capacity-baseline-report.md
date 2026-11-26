@@ -4,6 +4,9 @@
 > 所有绝对数字只代表这台机器的**下限**，不能当作云端或线上容量承诺。
 > 扩展效率（第 3 步）在同机上没有意义，未测；分机基线有条件时按 [bench-deploy.md](bench-deploy.md) 补。
 > 对应 [phase3-architecture-plan.md](../plan/phase3-architecture-plan.md) 3-1.4；测法与工具见 [../perf/baseline/README.md](../perf/baseline/README.md)。
+>
+> **注意**：本报告全部数据在 **MySQL 8** 上测得，之后数据库已迁移到 PostgreSQL 16（见 [behavior-changes.md](behavior-changes.md)）。
+> 数据库相关的数字（组件单测、热点行扣库存、MySQL CPU / 行锁）需要在 PG 上重新测量；文中的 `migration_v2.sql`、`mysql:3306`、sysbench 等均为当时的工具与环境。
 
 ## 1. 环境与口径
 
