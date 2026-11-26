@@ -1,10 +1,14 @@
 package com.hmdp.service;
 
 import cn.hutool.json.JSONUtil;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.hmdp.entity.Follow;
 import com.hmdp.metrics.BizMetrics;
 import com.hmdp.mq.BlogPublishedMessage;
 import com.hmdp.mq.KafkaConstants;
+import com.hmdp.utils.LocalCacheBroadcaster;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,6 +22,7 @@ import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -79,6 +84,46 @@ public class FeedService {
     /** 推送时每页读多少个粉丝（每页一次 DB 查询 + 一个 Redis pipeline） */
     @Value("${hmdp.feed.push-batch-size:1000}")
     private int pushBatchSize;
+
+    /** 「我关注的大 V」本地缓存秒数；<= 0 关闭 */
+    @Value("${hmdp.feed.bigv-local-cache-seconds:5}")
+    private long bigvLocalCacheSeconds;
+
+    @Value("${hmdp.feed.bigv-local-cache-max-size:200000}")
+    private long bigvLocalCacheMaxSize;
+
+    @Resource
+    private LocalCacheBroadcaster localCacheBroadcaster;
+
+    /** 用户 id → 他关注的人里哪些是大 V。null 表示关闭。值是不可变集合，可以在请求之间共享 */
+    private Cache<Long, Set<String>> followedBigVsCache;
+
+    private static final String BIGV_CACHE_NAME = "feed-bigv";
+
+    @PostConstruct
+    void initFollowedBigVsCache() {
+        if (bigvThreshold > 0 && bigvLocalCacheSeconds > 0 && bigvLocalCacheMaxSize > 0) {
+            followedBigVsCache = Caffeine.newBuilder()
+                    .expireAfterWrite(Duration.ofSeconds(bigvLocalCacheSeconds))
+                    .maximumSize(bigvLocalCacheMaxSize)
+                    .build();
+        }
+        // 关注 / 取关会改变「我关注的大 V」：通过广播让所有副本删掉这个用户的缓存
+        localCacheBroadcaster.register(BIGV_CACHE_NAME, key -> {
+            if (followedBigVsCache != null) {
+                followedBigVsCache.invalidate(Long.valueOf(key));
+            }
+        });
+    }
+
+    /** 关注关系变化后调用（FollowServiceImpl）：删本机缓存并通知其他副本；广播丢失时由本地缓存的短 TTL 兜底。 */
+    public void onFollowChanged(Long userId) {
+        if (followedBigVsCache == null) {
+            return;
+        }
+        followedBigVsCache.invalidate(userId);
+        localCacheBroadcaster.broadcast(BIGV_CACHE_NAME, userId.toString());
+    }
 
     /** 一页 Feed 及下一页的滚动参数 */
     public record FeedPage(List<Long> blogIds, long minTime, int offset) {
@@ -204,7 +249,7 @@ public class FeedService {
         // 1. 数据源：自己的收件箱 + 所关注大 V 的发件箱
         List<String> keys = new ArrayList<>();
         keys.add(FEED_KEY + userId);
-        for (String bigV : followedBigVs(userId)) {
+        for (String bigV : cachedFollowedBigVs(userId)) {
             keys.add(FEED_OUTBOX_KEY + bigV);
         }
         // 2. 每个数据源取 score <= max 的前 offset + pageSize 条（合并后的前 offset + pageSize 条一定在其中），一次往返
@@ -262,6 +307,23 @@ public class FeedService {
             nextOffset += skip;
         }
         return new FeedPage(ids, minTime, nextOffset);
+    }
+
+    /**
+     * 先查本地缓存。不用 Cache.get(key, loader)：loader 在 ConcurrentHashMap.compute 的 synchronized 里执行，
+     * 里面访问 Redis 会把虚拟线程钉在载体线程上；两个请求同时未命中时各查一次，结果相同，无害。
+     */
+    private Set<String> cachedFollowedBigVs(Long userId) {
+        if (followedBigVsCache == null) {
+            return followedBigVs(userId);
+        }
+        Set<String> cached = followedBigVsCache.getIfPresent(userId);
+        if (cached != null) {
+            return cached;
+        }
+        Set<String> bigVs = Set.copyOf(followedBigVs(userId));
+        followedBigVsCache.put(userId, bigVs);
+        return bigVs;
     }
 
     /**

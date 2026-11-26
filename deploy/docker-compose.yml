@@ -132,6 +132,12 @@ services:
       ORDER_ID_MODE: "${ORDER_ID_MODE:-local}"
       # 点赞数异步回写；false = 每次点赞更新一次 tb_blog
       LIKE_ASYNC_FLUSH: "${LIKE_ASYNC_FLUSH:-true}"
+      # 笔记列表（热门 / Feed）是否返回正文；true = 改造前
+      BLOG_LIST_CONTENT: "${BLOG_LIST_CONTENT:-false}"
+      # Feed 笔记摘要缓存的 Redis 秒数；0 = 关闭（每次查 tb_blog + tb_user）
+      BLOG_SUMMARY_CACHE_SECONDS: "${BLOG_SUMMARY_CACHE_SECONDS:-60}"
+      # 「我关注的大 V」本地缓存秒数；0 = 关闭（每次读 Feed 多一次 SINTER）
+      FEED_BIGV_LOCAL_CACHE_SECONDS: "${FEED_BIGV_LOCAL_CACHE_SECONDS:-5}"
       # 默认是 4G 内存机器的保守值；压测 / 生产用 APP_JAVA_OPTS 调大堆
       JAVA_OPTS: "${APP_JAVA_OPTS:--Xms256m -Xmx512m -Dfile.encoding=UTF-8}"
       TZ: Asia/Shanghai

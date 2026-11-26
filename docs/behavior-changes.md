@@ -53,6 +53,7 @@
 | 发笔记推送 | 粉丝收件箱无限增长 | 每个收件箱只保留最近 1000 条 |
 | `PUT /follow/or/not/{id}` | 每次 DB COUNT | 查 Redis `follows:{userId}`；集合不存在时回源 DB 并重建 |
 | 重复关注同一用户 | 插入重复行 | 唯一索引拦截，接口仍返回成功（幂等） |
+| 关注 / 取关时 `follows:{userId}` 不在 Redis（2026-11-24 修复） | 直接 `SADD` / `SREM`，建出一个只含本次对象的残缺集合，之后 `isFollow`、共同关注、Feed 查大 V 都按残缺集合判断 | Lua 原子地「存在才改」；不存在时从 DB 整体重建。共同关注求交集前也先补齐两边的集合 |
 
 ### 1.5 商铺详情 `GET /shop/{id}`
 
@@ -253,6 +254,48 @@ DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`OR
 
 未验证：写库中途失败的重试路径、提交后删除前进程被杀（均为代码审查）；多副本锁竞争为单实例实测。
 
+### 1.14 热门笔记与关注 Feed 读路径瘦身（2026-11-24，阶段 3-1 基线后的优化）
+
+起因：本机基线混合场景 200 并发时，`/blog/hot` P99 251 ms、`/blog/of/follow` P99 335 ms，是唯一的应用侧拖尾
+（见 [capacity-baseline-report.md](capacity-baseline-report.md) 3.2）。
+
+| | 之前 | 之后 |
+| --- | --- | --- |
+| 列表正文 | 热门笔记、关注 Feed 返回完整 `content` | 默认不返回（`content` 为 `null`），前端列表页本来就不显示；详情 `GET /blog/{id}` 不变 |
+| Feed 取笔记 | 每次请求 `tb_blog` 一次 `IN … ORDER BY FIELD` + `tb_user` 一次 `IN` | 摘要缓存：本地 Caffeine（10s）→ Redis `MGET cache:blog:summary:{id}`（60s ±10%）→ 只查缺的几篇；排序在 Java 里做 |
+| Feed 查大 V | 每次请求 `EXISTS follows:{uid}` + `SINTER`；关注集合为空的用户每次还查一次 `tb_follow` | 「我关注的大 V」在副本内缓存 5s；关注 / 取关时广播删除 |
+| 列表复制 | 热门笔记每次请求用 Hutool `BeanUtil.copyProperties` 反射复制 10 个对象 | 手写字段拷贝 |
+
+每次请求的访问次数（缓存命中时）：
+
+| 接口 | 之前 | 之后 |
+| --- | --- | --- |
+| `GET /blog/of/follow` | MySQL 2 次 + Redis 3 次往返 | MySQL 0 次 + Redis 2 次往返（取 ID、判断点赞）；本地摘要未命中时 +1 次 `MGET` |
+| `GET /blog/hot` | Redis 1 次（判断点赞） | 不变，只是响应变小、不再反射复制 |
+
+- 开关：`BLOG_LIST_CONTENT=true` 列表恢复返回正文；`BLOG_SUMMARY_CACHE_SECONDS=0` 关闭摘要缓存（Feed 每次查库）；
+  `FEED_BIGV_LOCAL_CACHE_SECONDS=0` 关闭大 V 本地缓存。
+- **点赞数可见性**：Feed 里的 `liked` 最多滞后 摘要 Redis TTL + 本地 TTL（默认约 70s）+ 点赞回写周期（5s），
+  与热门笔记缓存（60s + 本地 10s）同一量级；`isLike` 仍按位图实时判断。点了赞的人在前端本地 +1，不受影响。
+- 作者昵称 / 头像跟着摘要缓存，目前没有修改用户资料的接口，所以不存在不一致；以后加了需要同时删 `cache:blog:summary:*`。
+- 关注 / 取关：本副本立即生效，其他副本靠 Pub/Sub 广播（`feed-bigv|{userId}`），广播丢失时最多 5s。
+  作者刚越过大 V 阈值时，这条及之后的笔记最多晚 5s 出现在粉丝的 Feed 里。
+- 不存在的笔记 id 不缓存（Feed 引用的都是已发布笔记，正常不会出现）。
+- 大 V 本地缓存不用 `Cache.get(key, loader)`：loader 在 `ConcurrentHashMap.compute` 的锁里执行，访问 Redis 会钉住虚拟线程。
+
+本机验证（2026-11-24，Docker Desktop，单副本，基线造数）：
+
+| 场景 | 结果 |
+| --- | --- |
+| 热门笔记 | 10 条，响应里没有 `content` 字段；`isLike` 正确 |
+| Feed 冷读 / 再读 | 两次结果、`minTime` / `offset` 一致；冷读后生成 5 个 `cache:blog:summary:*`，TTL ≈ 60s，内容与 DB（昵称、点赞数、时间）一致 |
+| 关注大 V 后立即读 | 大 V 发件箱的 3 条立即出现在 Feed 里；取关后立即消失（同一副本） |
+| 点赞状态隔离 | 测试用户点赞后 Feed / 热门里 `isLike = true`，另一个用户读同一篇仍是 `false`；取消后恢复 |
+| `BLOG_LIST_CONTENT=true` + `BLOG_SUMMARY_CACHE_SECONDS=0` + `FEED_BIGV_LOCAL_CACHE_SECONDS=0` | 列表恢复返回正文；Feed 不再写摘要缓存，结果顺序不变 |
+
+未验证：多副本之间的广播删除（与 1.10 同一套 Pub/Sub，未单独测）；尚未压测，性能收益待重跑混合场景拐点。
+切换 `BLOG_LIST_CONTENT` 后，已缓存的热门笔记分页最多还按旧格式返回 60s。
+
 ## 2. Redis key 变化
 
 | key | 类型 | 说明 |
@@ -276,6 +319,7 @@ DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`OR
 | `blog:like:delta` | hash | 待回写的点赞数增量：field = 笔记 id，value = 尚未写回 `tb_blog.liked` 的增量（见 1.13） |
 | `blog:like:delta:flushing` | hash | 正在回写的那一批增量；写库成功后删除，失败则保留到下一轮重试 |
 | `lock:job:like-flush` | Redisson 锁 | 点赞数回写任务集群互斥 |
+| `cache:blog:summary:{blogId}` | string(JSON)，TTL ~60s | Feed 用的笔记摘要（笔记 + 作者昵称头像，不含 `isLike`），见 1.14 |
 
 ## 3. 配置变化（`application.yaml`）
 
@@ -284,13 +328,16 @@ DB 订单 2000 行、DB 与 Redis 库存都是 98000；期间 `INCR` 0 次（`OR
 | `spring.datasource.url` | `serverTimezone=UTC` | `serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true` |
 | `spring.datasource.hikari.maximum-pool-size` | 默认 10 | `${DB_POOL_MAX:30}`，`minimum-idle: 10`，`connection-timeout: 3000`（之后改为 `${DB_CONN_TIMEOUT_MS:800}`，见 1.6） |
 | `hmdp.db-gate.permits` | 无 | `${DB_GATE_PERMITS:-1}`（负数 = 连接池 × 2，0 = 关闭） |
-| `spring.data.redis.lettuce.pool.max-active` | 10 | 50（`max-wait: 2000ms`，`timeout: 2000ms`） |
+| `spring.data.redis.lettuce.pool.max-active` | 10 | 50（`max-wait: 2000ms`，`timeout: 2000ms`）；`max-idle` 20 → 50（2026-11-24）：小于 max-active 时归还的连接被关闭再新建，i5 本机 50 并发热门笔记每秒新建约 1100 个连接，改后 200 并发 QPS 2.2k → 9.9k、P99 1.36s → 67ms |
 | `server.tomcat.*` | 默认 | `threads.max: 200`，`accept-count: 500`，`max-connections: 8192` |
 | `spring.servlet.multipart` | 默认 | `max-file-size: 5MB`，`max-request-size: 10MB` |
 | `spring.kafka.consumer.properties.max.poll.interval.ms` | 默认 | 300000 |
 | `hmdp.kafka.seckill-partitions` | 无（硬编码 3） | 12 |
 | `hmdp.upload.dir` | 无 | `${HMDP_UPLOAD_DIR:./upload}` |
 | `hmdp.like.async-flush` / `hmdp.like.flush-interval-ms` | 无 | `${LIKE_ASYNC_FLUSH:true}` / 5000ms；false 回到每次点赞同步写库（见 1.13） |
+| `hmdp.blog.list-content` | 无 | `${BLOG_LIST_CONTENT:false}`；列表不返回正文（见 1.14） |
+| `hmdp.blog.summary-cache.*` | 无 | `redis-ttl-seconds: ${BLOG_SUMMARY_CACHE_SECONDS:60}`（<= 0 关闭）、`local-ttl-seconds: 10`、`local-max-size: 50000` |
+| `hmdp.feed.bigv-local-cache-*` | 无 | `seconds: ${FEED_BIGV_LOCAL_CACHE_SECONDS:5}`（0 关闭）、`max-size: 200000` |
 | `logging.level.com.hmdp` | debug | info；`application-dev.yaml` 中为 debug（`--spring.profiles.active=dev`） |
 
 ## 4. 数据库变化

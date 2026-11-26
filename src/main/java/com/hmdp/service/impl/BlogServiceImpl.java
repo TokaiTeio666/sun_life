@@ -28,11 +28,15 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
+import com.baomidou.mybatisplus.extension.conditions.query.QueryChainWrapper;
+import jakarta.annotation.PostConstruct;
 import jakarta.annotation.Resource;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,6 +49,7 @@ import static com.hmdp.utils.RedisConstants.BLOG_LIKE_DELTA_KEY;
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_TOP_KEY;
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_TOP_LIMIT;
 import static com.hmdp.utils.RedisConstants.BLOG_UV_KEY;
+import static com.hmdp.utils.RedisConstants.CACHE_BLOG_SUMMARY_KEY;
 import static com.hmdp.utils.RedisConstants.CACHE_HOT_BLOG_KEY;
 import static com.hmdp.utils.RedisConstants.CACHE_HOT_BLOG_TTL_SECONDS;
 
@@ -90,6 +95,30 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     @Value("${hmdp.like.async-flush:true}")
     private boolean likeAsyncFlush;
 
+    /** 列表接口不含正文时查询的列（前端列表页不显示正文，详情页单独取） */
+    private static final String[] LIST_COLUMNS = {
+            "id", "shop_id", "user_id", "title", "images", "liked", "comments", "create_time", "update_time"};
+
+    /** 列表是否返回正文；false 时只查 LIST_COLUMNS */
+    @Value("${hmdp.blog.list-content:false}")
+    private boolean listContent;
+
+    /** Feed 笔记摘要的 Redis 缓存秒数；<= 0 关闭摘要缓存（本地与 Redis 两级都不用） */
+    @Value("${hmdp.blog.summary-cache.redis-ttl-seconds:60}")
+    private long summaryRedisTtlSeconds;
+
+    @Value("${hmdp.blog.summary-cache.local-ttl-seconds:10}")
+    private long summaryLocalTtlSeconds;
+
+    @Value("${hmdp.blog.summary-cache.local-max-size:50000}")
+    private long summaryLocalMaxSize;
+
+    /**
+     * Feed 笔记摘要的本地缓存（笔记 id → 已填好作者信息的 Blog，不含 isLike）。
+     * 不放进通用的 LocalCache：摘要条数多，会把店铺详情挤出去。缓存里的对象在请求之间共享，返回前必须复制。
+     */
+    private Cache<Long, Blog> summaryLocal;
+
     /** 已确认存在的笔记 id（笔记没有删除接口，可以缓存较久）：异步回写时点赞接口用它判断笔记是否存在，不必每次查库 */
     private final Cache<Long, Boolean> existingBlogIds = Caffeine.newBuilder()
             .maximumSize(200_000)
@@ -110,6 +139,20 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
     @Resource
     private ObjectMapper objectMapper;
+
+    @PostConstruct
+    void initSummaryCache() {
+        if (summaryRedisTtlSeconds > 0 && summaryLocalTtlSeconds > 0 && summaryLocalMaxSize > 0) {
+            summaryLocal = Caffeine.newBuilder()
+                    .expireAfterWrite(Duration.ofSeconds(summaryLocalTtlSeconds))
+                    .maximumSize(summaryLocalMaxSize)
+                    .build();
+        }
+        log.info("笔记列表：正文 {}；Feed 摘要缓存 {}", listContent ? "返回" : "不返回",
+                summaryRedisTtlSeconds <= 0 ? "关闭（每次查库）"
+                        : "Redis " + summaryRedisTtlSeconds + "s"
+                        + (summaryLocal == null ? "，本地关闭" : "，本地 " + summaryLocalTtlSeconds + "s / " + summaryLocalMaxSize + " 条"));
+    }
 
     @Override
     public Result queryBlogById(Long id) {
@@ -139,7 +182,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         List<Blog> records = shared != null ? shared : readBlogCache(key);
         if (records == null) {
             int offset = (page - 1) * SystemConstants.MAX_PAGE_SIZE;
-            records = query()
+            records = listQuery()
                     .orderByDesc("liked")
                     .last("LIMIT " + offset + "," + SystemConstants.MAX_PAGE_SIZE)
                     .list();
@@ -150,7 +193,7 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             localCache.put(key, records);
         }
         // 本地缓存里的对象在请求之间共享，而 isLike 因人而异：复制一份再填，不能改缓存里的对象
-        records = records.stream().map(b -> BeanUtil.copyProperties(b, Blog.class)).collect(Collectors.toList());
+        records = records.stream().map(BlogServiceImpl::copyOf).collect(Collectors.toList());
         fillBlogLiked(records);
         return Result.ok(records);
     }
@@ -256,11 +299,8 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
         if (page == null) {
             return Result.ok();
         }
-        List<Long> ids = page.blogIds();
-        // 4.根据id查询blog，批量补充作者与点赞状态
-        String idStr = StrUtil.join(",", ids);
-        List<Blog> blogs = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
-        fillBlogUsers(blogs);
+        // 4.按 id 取笔记摘要（含作者，走摘要缓存），再批量补充点赞状态
+        List<Blog> blogs = loadBlogSummaries(page.blogIds());
         fillBlogLiked(blogs);
 
         // 5.封装并返回
@@ -304,6 +344,135 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
     private String today() {
         return LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE);
+    }
+
+    /** 列表查询：不返回正文时只查 LIST_COLUMNS */
+    private QueryChainWrapper<Blog> listQuery() {
+        return listContent ? query() : query().select(LIST_COLUMNS);
+    }
+
+    /**
+     * 按 id 批量取笔记摘要（笔记 + 作者昵称头像，不含 isLike），结果按 ids 的顺序排列，不存在的 id 跳过。
+     * 本地缓存 → Redis 一次 MGET → 只查缺的那几篇（tb_blog 一次 IN + tb_user 一次 IN），查到的回填两级缓存。
+     * 返回的是副本，调用方可以直接设置 isLike。
+     */
+    private List<Blog> loadBlogSummaries(List<Long> ids) {
+        if (ids.isEmpty()) {
+            return new ArrayList<>();
+        }
+        Map<Long, Blog> found = new HashMap<>(ids.size() * 2);
+        List<Long> missing = new ArrayList<>(ids.size());
+        for (Long id : ids) {
+            Blog cached = summaryLocal == null ? null : summaryLocal.getIfPresent(id);
+            if (cached != null) {
+                found.put(id, cached);
+            } else {
+                missing.add(id);
+            }
+        }
+        if (!missing.isEmpty() && summaryRedisTtlSeconds > 0) {
+            missing = readSummaryCache(missing, found);
+        }
+        if (!missing.isEmpty()) {
+            List<Blog> fromDb = listQuery().in("id", missing).list();
+            fillBlogUsers(fromDb);
+            for (Blog blog : fromDb) {
+                found.put(blog.getId(), blog);
+            }
+            if (summaryRedisTtlSeconds > 0) {
+                writeSummaryCache(fromDb);
+            }
+        }
+        List<Blog> result = new ArrayList<>(ids.size());
+        for (Long id : ids) {
+            Blog blog = found.get(id);
+            if (blog != null) {
+                result.add(copyOf(blog));
+            }
+        }
+        return result;
+    }
+
+    /** Redis MGET 读摘要，命中的放进 found 并回填本地缓存，返回仍未命中的 id。Redis 出错时全部按未命中处理（回源 DB）。 */
+    private List<Long> readSummaryCache(List<Long> ids, Map<Long, Blog> found) {
+        List<String> jsons;
+        try {
+            jsons = stringRedisTemplate.opsForValue().multiGet(
+                    ids.stream().map(id -> CACHE_BLOG_SUMMARY_KEY + id).collect(Collectors.toList()));
+        } catch (Exception e) {
+            log.warn("笔记摘要缓存读取失败，回源 DB", e);
+            return ids;
+        }
+        List<Long> missing = new ArrayList<>();
+        for (int i = 0; i < ids.size(); i++) {
+            String json = jsons == null ? null : jsons.get(i);
+            Blog blog = null;
+            if (json != null) {
+                try {
+                    blog = objectMapper.readValue(json, Blog.class);
+                } catch (Exception e) {
+                    log.warn("笔记摘要缓存反序列化失败，回源 DB id={}", ids.get(i), e);
+                }
+            }
+            if (blog != null) {
+                found.put(ids.get(i), blog);
+                if (summaryLocal != null) {
+                    summaryLocal.put(ids.get(i), blog);
+                }
+            } else {
+                missing.add(ids.get(i));
+            }
+        }
+        return missing;
+    }
+
+    /** 回填两级缓存：Redis 用一个 pipeline 批量 SET EX，TTL ±10% 抖动。写失败只记日志，下次再回源。 */
+    private void writeSummaryCache(List<Blog> blogs) {
+        if (blogs.isEmpty()) {
+            return;
+        }
+        if (summaryLocal != null) {
+            for (Blog blog : blogs) {
+                summaryLocal.put(blog.getId(), blog);
+            }
+        }
+        try {
+            long base = summaryRedisTtlSeconds;
+            List<String[]> entries = new ArrayList<>(blogs.size());
+            for (Blog blog : blogs) {
+                entries.add(new String[]{CACHE_BLOG_SUMMARY_KEY + blog.getId(), objectMapper.writeValueAsString(blog)});
+            }
+            stringRedisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+                StringRedisConnection conn = (StringRedisConnection) connection;
+                for (String[] e : entries) {
+                    conn.setEx(e[0], base + RandomUtil.randomLong(-base / 10, base / 10 + 1), e[1]);
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            log.warn("笔记摘要缓存写入失败", e);
+        }
+    }
+
+    /**
+     * 复制一份笔记（缓存里的对象在请求之间共享，isLike 因人而异，填之前先复制）。
+     * 手写字段拷贝，代替按反射逐字段复制的 BeanUtil.copyProperties；Blog 增加字段时这里要同步。
+     */
+    private static Blog copyOf(Blog b) {
+        return new Blog()
+                .setId(b.getId())
+                .setShopId(b.getShopId())
+                .setUserId(b.getUserId())
+                .setIcon(b.getIcon())
+                .setName(b.getName())
+                .setIsLike(b.getIsLike())
+                .setTitle(b.getTitle())
+                .setImages(b.getImages())
+                .setContent(b.getContent())
+                .setLiked(b.getLiked())
+                .setComments(b.getComments())
+                .setCreateTime(b.getCreateTime())
+                .setUpdateTime(b.getUpdateTime());
     }
 
     /** 批量补充作者昵称与头像：一次 IN 查询替代逐条 getById */

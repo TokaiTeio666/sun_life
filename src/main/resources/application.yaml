@@ -44,7 +44,10 @@ spring:
       lettuce:
         pool:
           max-active: 50
-          max-idle: 20
+          # max-idle 必须等于 max-active：小于它时，并发借出超过 max-idle 的连接在归还时会被直接关闭、下次再新建。
+          # 本机实测 max-idle=20 时 50 并发的热门笔记（每请求一次 pipeline）每秒新建约 1100 个 Redis 连接，
+          # app 与 Redis 的 CPU 都耗在建连上，并发越高 QPS 越低
+          max-idle: 50
           min-idle: 5
           max-wait: 2000ms
           time-between-eviction-runs: 10s
@@ -112,6 +115,19 @@ hmdp:
     sync-interval-ms: 60000
   # 点赞数异步回写（见 LikeCountFlusher）：点赞接口只写 Redis，增量每 flush-interval-ms 批量写回 tb_blog.liked。
   # false = 回到每次点赞更新一次 tb_blog
+  # 笔记列表（热门笔记、关注 Feed）
+  blog:
+    # 列表是否返回正文 content。前端列表页只用标题 / 首图 / 作者 / 点赞，正文在详情页 GET /blog/{id} 里取；
+    # 不返回时响应体小一半以上。true = 回到改造前（列表带正文）
+    list-content: ${BLOG_LIST_CONTENT:false}
+    # Feed 用的单篇笔记摘要缓存（笔记 + 作者昵称头像）：本地 Caffeine → Redis MGET → 只查缺的那几篇。
+    # 点赞数最多滞后 redis-ttl-seconds + local-ttl-seconds（与热门笔记缓存同量级）。
+    # redis-ttl-seconds <= 0 = 关闭，Feed 每次查 tb_blog + tb_user（改造前）
+    summary-cache:
+      redis-ttl-seconds: ${BLOG_SUMMARY_CACHE_SECONDS:60}
+      local-ttl-seconds: 10
+      # 一条摘要（不含正文）约 0.5KB，5 万条约 25MB
+      local-max-size: 50000
   like:
     async-flush: ${LIKE_ASYNC_FLUSH:true}
     flush-interval-ms: 5000
@@ -135,6 +151,10 @@ hmdp:
     async-push: ${FEED_ASYNC_PUSH:true}
     # 粉丝数超过该值的作者（大 V）不推送，粉丝读 Feed 时从作者发件箱拉取；<= 0 表示不区分大 V
     bigv-threshold: ${FEED_BIGV_THRESHOLD:5000}
+    # 「我关注的大 V」在副本内缓存的秒数，命中时读 Feed 少一次 Redis 往返（关注集合为空的用户也不再每次查库）。
+    # 关注 / 取关时广播删除；新晋大 V 最多晚这么久出现在粉丝的 Feed 里。0 = 关闭
+    bigv-local-cache-seconds: ${FEED_BIGV_LOCAL_CACHE_SECONDS:5}
+    bigv-local-cache-max-size: 200000
     # 推送时每页粉丝数（一次 DB 查询 + 一个 Redis pipeline）
     push-batch-size: 1000
     # blog.published 主题分区数与每个副本的消费线程数

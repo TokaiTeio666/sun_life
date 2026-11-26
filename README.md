@@ -298,6 +298,7 @@ deploy\stop.bat   # 或 sh deploy/stop.sh
 > 扩容到多副本：`docker compose -f deploy/docker-compose.yml up -d --scale app=3`，之后 `restart frontend` 让 nginx 重新解析副本。
 > 已有数据卷的环境需补索引：`docker exec -i hmdp-mysql mysql -uroot -p123456 hmdp < src/main/resources/db/migration_v2.sql`。
 > 扩容路线与各阶段优化说明见 [docs/scaling-roadmap.md](docs/scaling-roadmap.md)。
+> 原理性知识笔记（连接池、拐点与安全容量等）见 [docs/knowledge/](docs/knowledge/README.md)。
 > 监控（Prometheus + Grafana + exporter，Grafana `localhost:3000`）：主编排后追加 `-f deploy/docker-compose.monitoring.yml`，
 > 说明见 [docs/monitoring.md](docs/monitoring.md)。
 >

@@ -41,6 +41,8 @@ public class RedisConstants {
     /** 热门笔记分页缓存 */
     public static final String CACHE_HOT_BLOG_KEY = "cache:blog:hot:";
     public static final Long CACHE_HOT_BLOG_TTL_SECONDS = 60L;
+    /** 单篇笔记的列表摘要缓存（JSON：笔记字段 + 作者昵称头像，不含点赞状态），供关注 Feed 批量读取 */
+    public static final String CACHE_BLOG_SUMMARY_KEY = "cache:blog:summary:";
     /** 粉丝收件箱最多保留条数 */
     public static final int FEED_MAX_SIZE = 1000;
     /** 作者发件箱（zset，member = 笔记 id，score = 发布时间毫秒）：大 V 的笔记不推送，粉丝读 Feed 时从这里拉取 */
